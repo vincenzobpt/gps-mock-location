@@ -14,10 +14,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mocklocation.app.model.LatLng
 import com.mocklocation.app.model.MarkerMode
@@ -51,6 +54,26 @@ fun MapScreen(viewModel: MapViewModel) {
     val mapCenter by viewModel.mapCenter.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Keep a reference to the MapView so lifecycle observer can call onResume/onPause
+    val mapViewRef = remember { mutableStateOf<MapView?>(null) }
+
+    // ── Lifecycle management for osmdroid MapView ─────────────
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> mapViewRef.value?.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapViewRef.value?.onPause()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            mapViewRef.value?.onDetach()
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -91,6 +114,8 @@ fun MapScreen(viewModel: MapViewModel) {
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
                     MapView(ctx).apply {
+                        mapViewRef.value = this
+
                         setTileSource(org.osmdroid.tileprovider.tilesource.TileSourceFactory.MAPNIK)
                         setMultiTouchControls(true)
                         setBuiltInZoomControls(false)
@@ -115,7 +140,7 @@ fun MapScreen(viewModel: MapViewModel) {
                     }
                 },
                 update = { mapView ->
-                    // Remove dynamic overlays
+                    // Remove only dynamic overlays (keep MapEventsOverlay)
                     val toRemove = mutableListOf<org.osmdroid.views.overlay.Overlay>()
                     for (overlay in mapView.overlays) {
                         if (overlay is OsmMarker || overlay is Polyline) {
@@ -154,7 +179,7 @@ fun MapScreen(viewModel: MapViewModel) {
                             position = GeoPoint(pos.latitude, pos.longitude)
                             setAnchor(OsmMarker.ANCHOR_CENTER, OsmMarker.ANCHOR_CENTER)
                             title = "Current"
-                            icon = markerIcon(context, color, "●", sizeDp = 16)
+                            icon = markerIcon(context, color, "\u25CF", sizeDp = 16)
                         }
                         mapView.overlays.add(marker)
                     }
@@ -285,16 +310,12 @@ private fun BottomControls(
                     MarkerMode.START -> "Set START"
                     MarkerMode.END -> "Set END"
                 }
-                val modeColor = when (markerMode) {
-                    MarkerMode.START -> MaterialTheme.colorScheme.secondary
-                    MarkerMode.END -> MaterialTheme.colorScheme.error
-                }
                 SuggestionChip(
                     onClick = onCycleMarkerMode,
                     label = { Text(modeLabel, fontSize = 12.sp) },
                     icon = {
                         Text(
-                            if (markerMode == MarkerMode.START) "📍" else "🏁",
+                            if (markerMode == MarkerMode.START) "\uD83D\uDCCD" else "\uD83C\uDFC1",
                             fontSize = 12.sp
                         )
                     },
@@ -305,7 +326,7 @@ private fun BottomControls(
 
                 route?.let {
                     Text(
-                        text = "${it.totalDistanceFormatted} · ${it.durationFormatted}",
+                        text = "${it.totalDistanceFormatted} \u00B7 ${it.durationFormatted}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -351,25 +372,25 @@ private fun BottomControls(
                     when (simulation.status) {
                         SimulationStatus.IDLE -> {
                             FilledTonalButton(onClick = onPlay) {
-                                Text("▶ Play")
+                                Text("\u25B6 Play")
                             }
                         }
                         SimulationStatus.PLAYING -> {
                             FilledTonalButton(onClick = onPause) {
-                                Text("⏸ Pause")
+                                Text("\u23F8 Pause")
                             }
                             Spacer(Modifier.width(4.dp))
                             OutlinedButton(onClick = onStop) {
-                                Text("⏹ Stop")
+                                Text("\u23F9 Stop")
                             }
                         }
                         SimulationStatus.PAUSED -> {
                             FilledTonalButton(onClick = onPlay) {
-                                Text("▶ Resume")
+                                Text("\u25B6 Resume")
                             }
                             Spacer(Modifier.width(4.dp))
                             OutlinedButton(onClick = onStop) {
-                                Text("⏹ Stop")
+                                Text("\u23F9 Stop")
                             }
                         }
                     }
@@ -414,12 +435,12 @@ private fun SpeedSelector(
                     onClick = { onSelect(speed) },
                     label = {
                         Text(
-                            text = "${speed.toInt()}×",
+                            text = "${speed.toInt()}\u00D7",
                             fontSize = 12.sp
                         )
                     },
                     leadingIcon = if (selected) {
-                        { Text("✓", fontSize = 11.sp) }
+                        { Text("\u2713", fontSize = 11.sp) }
                     } else null
                 )
             }
@@ -444,8 +465,8 @@ private fun SimulationInfoOverlay(
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             val statusText = when (simulation.status) {
-                SimulationStatus.PLAYING -> "▶ Running"
-                SimulationStatus.PAUSED -> "⏸ Paused"
+                SimulationStatus.PLAYING -> "\u25B6 Running"
+                SimulationStatus.PAUSED -> "\u23F8 Paused"
                 else -> ""
             }
             Text(statusText, fontWeight = FontWeight.Bold, fontSize = 13.sp)

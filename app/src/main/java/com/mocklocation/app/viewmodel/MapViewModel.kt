@@ -108,6 +108,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         _endPoint.value = null
         _route.value = null
         _errorMessage.value = null
+        _markerMode.value = MarkerMode.START
     }
 
     // ── Simulation controls ────────────────────────────────────
@@ -274,8 +275,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             }
             lm.setTestProviderLocation(LocationManager.GPS_PROVIDER, location)
         } catch (_: SecurityException) {
-            _errorMessage.value = "Mock location not granted.\n" +
-                "Go to: Developer Options → Select Mock Location App → choose MockLocation"
+            _errorMessage.value = "Mock location not granted. Go to: Developer Options \u2192 Select mock location app \u2192 choose MockLocation"
         } catch (_: Exception) {
             // Ignore transient errors
         }
