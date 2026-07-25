@@ -228,4 +228,4 @@ derivative works.
 
 ## Author
 
-**Vincenzo Buonomo** — [@vincenzobpt](https://github.com/vincenzobpt)
+**Vincenzo Buonomano** — [@vincenzobpt](https://github.com/vincenzobpt)

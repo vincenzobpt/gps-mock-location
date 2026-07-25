@@ -395,7 +395,7 @@ private fun AboutDialog(onDismiss: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                text = "MIT \u2014 Vincenzo Buonomo",
+                                text = "MIT \u2014 VINCENZO BUONOMANO",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
