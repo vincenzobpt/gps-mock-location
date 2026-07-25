@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">MockLocation</string>
+    <string name="app_name">GPS Mock Location</string>
     <string name="start_point">Start point</string>
     <string name="end_point">End point</string>
     <string name="calculate_route">Calculate Route</string>

@@ -9,15 +9,23 @@ import androidx.lifecycle.viewModelScope
 import com.mocklocation.app.model.LatLng
 import com.mocklocation.app.model.MarkerMode
 import com.mocklocation.app.model.Route
+import com.mocklocation.app.model.SearchSuggestion
 import com.mocklocation.app.model.SimulationState
 import com.mocklocation.app.model.SimulationStatus
 import com.mocklocation.app.network.OsrmRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
+import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 class MapViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -44,12 +52,108 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     private val _simulation = MutableStateFlow(SimulationState())
     val simulation: StateFlow<SimulationState> = _simulation.asStateFlow()
 
-    private var simulationJob: Job? = null
-    private val repository = OsrmRepository()
-
     // ── Map center (default: Rome) ──────────────────────────────
     private val _mapCenter = MutableStateFlow(LatLng(41.9028, 12.4964))
     val mapCenter: StateFlow<LatLng> = _mapCenter.asStateFlow()
+
+    private var simulationJob: Job? = null
+    private val repository = OsrmRepository()
+
+    // ── HTTP client for Nominatim geocoding ─────────────────────
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .build()
+
+    // ── Search state ────────────────────────────────────────────
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _isSearching = MutableStateFlow(false)
+    val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
+
+    private val _searchSuggestions = MutableStateFlow<List<SearchSuggestion>>(emptyList())
+    val searchSuggestions: StateFlow<List<SearchSuggestion>> = _searchSuggestions.asStateFlow()
+
+    private var searchJob: Job? = null
+
+    /** Called on every keystroke — debounced 300 ms, fetches auto-complete suggestions. */
+    fun onSearchQueryChanged(query: String) {
+        _searchQuery.value = query
+        if (query.isBlank()) {
+            _searchSuggestions.value = emptyList()
+            searchJob?.cancel()
+            return
+        }
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            delay(300) // debounce
+            _isSearching.value = true
+            try {
+                val results = geocode(query.trim(), limit = 5)
+                _searchSuggestions.value = results
+            } catch (_: Exception) {
+                // silent for suggestions — don't spam error banner
+            }
+            _isSearching.value = false
+        }
+    }
+
+    /** Called when user presses Go / keyboard Search. Centers map on first result. */
+    fun searchExplicit(query: String) {
+        if (query.isBlank()) return
+        searchJob?.cancel()
+        viewModelScope.launch {
+            _isSearching.value = true
+            _errorMessage.value = null
+            try {
+                val results = geocode(query.trim(), limit = 1)
+                if (results.isNotEmpty()) {
+                    val hit = results.first()
+                    _mapCenter.value = LatLng(hit.latitude, hit.longitude)
+                    _searchQuery.value = hit.displayName
+                    _searchSuggestions.value = emptyList()
+                } else {
+                    _errorMessage.value = "Location not found"
+                }
+            } catch (e: Exception) {
+                _errorMessage.value = "Search error: ${e.localizedMessage ?: "Unknown"}"
+            }
+            _isSearching.value = false
+        }
+    }
+
+    /** Called when user taps a suggestion. Centers map and closes list. */
+    fun selectSuggestion(suggestion: SearchSuggestion) {
+        _mapCenter.value = LatLng(suggestion.latitude, suggestion.longitude)
+        _searchQuery.value = suggestion.displayName
+        _searchSuggestions.value = emptyList()
+    }
+
+    /** Clear suggestions (e.g. when map is tapped). */
+    fun clearSuggestions() {
+        _searchSuggestions.value = emptyList()
+    }
+
+    private suspend fun geocode(query: String, limit: Int): List<SearchSuggestion> =
+        withContext(Dispatchers.IO) {
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val request = Request.Builder()
+                .url("https://nominatim.openstreetmap.org/search?q=$encoded&format=json&limit=$limit")
+                .header("User-Agent", "MockLocation/1.0 (Android)")
+                .build()
+            val response = httpClient.newCall(request).execute()
+            val body = response.body?.string() ?: return@withContext emptyList()
+            val arr = JSONArray(body)
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                SearchSuggestion(
+                    displayName = obj.getString("display_name"),
+                    latitude = obj.getDouble("lat"),
+                    longitude = obj.getDouble("lon")
+                )
+            }
+        }
 
     // ── Speed options ──────────────────────────────────────────
     val speedOptions = listOf(0.5f, 1f, 2f, 5f, 10f, 50f)
