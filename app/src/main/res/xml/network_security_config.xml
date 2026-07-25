@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">router.project-osrm.org</domain>
+        <domain includeSubdomains="true">tile.openstreetmap.org</domain>
+    </domain-config>
+</network-security-config>

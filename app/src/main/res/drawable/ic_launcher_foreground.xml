@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Map pin icon -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,28c-8.28,0 -15,6.72 -15,15c0,11.25 15,29 15,29s15,-17.75 15,-29c0,-8.28 -6.72,-15 -15,-15zM54,48c-2.76,0 -5,-2.24 -5,-5s2.24,-5 5,-5s5,2.24 5,5s-2.24,5 -5,5z"/>
+    <!-- Crosshair circle -->
+    <path
+        android:fillColor="#1A73E8"
+        android:pathData="M54,18A5,5 0,0 1,59 23A5,5 0,0 1,49 23A5,5 0,0 1,54 18zM18,49A5,5 0,0 1,23 54A5,5 0,0 1,18 59A5,5 0,0 1,18 49zM54,85A5,5 0,0 1,59 90A5,5 0,0 1,49 90A5,5 0,0 1,54 85zM85,49A5,5 0,0 1,90 54A5,5 0,0 1,85 59A5,5 0,0 1,85 49z"/>
+</vector>
