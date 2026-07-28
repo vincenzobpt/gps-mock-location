@@ -15,5 +15,5 @@ data class OsrmRoute(
 )
 
 data class OsrmGeometry(
-    val coordinates: List<List<Double>> // [[lng, lat], …]
+    val coordinates: List<List<Double>> // [[lng, lat, ?elevation], …]
 )

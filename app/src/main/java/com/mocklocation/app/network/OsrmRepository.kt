@@ -55,11 +55,16 @@ class OsrmRepository {
                 val points = route.geometry.coordinates.map { (lng, lat) ->
                     LatLng(latitude = lat, longitude = lng)
                 }
+                // Check if coordinates include elevation (3 elements per point)
+                val elevations = route.geometry.coordinates.mapNotNull { coord ->
+                    if (coord.size >= 3) coord[2] else null
+                }
                 Result.success(
                     Route(
                         points = points,
                         distanceMeters = route.distance,
-                        durationSeconds = route.duration
+                        durationSeconds = route.duration,
+                        elevations = if (elevations.size == points.size) elevations else emptyList()
                     )
                 )
             } else {

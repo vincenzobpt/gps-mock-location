@@ -48,13 +48,15 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    private val _mapCenter = MutableStateFlow(LatLng(41.9028, 12.4964))
+    val mapCenter: StateFlow<LatLng> = _mapCenter.asStateFlow()
+
+    private val _mapZoom = MutableStateFlow(3.0)
+    val mapZoom: StateFlow<Double> = _mapZoom.asStateFlow()
+
     // ── Simulation state ───────────────────────────────────────
     private val _simulation = MutableStateFlow(SimulationState())
     val simulation: StateFlow<SimulationState> = _simulation.asStateFlow()
-
-    // ── Map center (default: Rome) ──────────────────────────────
-    private val _mapCenter = MutableStateFlow(LatLng(41.9028, 12.4964))
-    val mapCenter: StateFlow<LatLng> = _mapCenter.asStateFlow()
 
     private var simulationJob: Job? = null
     private val repository = OsrmRepository()
@@ -111,6 +113,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                 if (results.isNotEmpty()) {
                     val hit = results.first()
                     _mapCenter.value = LatLng(hit.latitude, hit.longitude)
+                    _mapZoom.value = 15.0
                     _searchQuery.value = hit.displayName
                     _searchSuggestions.value = emptyList()
                 } else {
@@ -126,6 +129,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     /** Called when user taps a suggestion. Centers map and closes list. */
     fun selectSuggestion(suggestion: SearchSuggestion) {
         _mapCenter.value = LatLng(suggestion.latitude, suggestion.longitude)
+        _mapZoom.value = 15.0
         _searchQuery.value = suggestion.displayName
         _searchSuggestions.value = emptyList()
     }
@@ -169,10 +173,40 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         _maxSpeedKmh.value = v.coerceIn(_minSpeedKmh.value, 240f)
     }
 
+    // ── Altitude bounds (metres) ──────────────────────────────────
+    private val _minAltitude = MutableStateFlow(0f)
+    val minAltitude: StateFlow<Float> = _minAltitude.asStateFlow()
+
+    private val _maxAltitude = MutableStateFlow(1000f)
+    val maxAltitude: StateFlow<Float> = _maxAltitude.asStateFlow()
+
+    fun setMinAltitude(v: Float) {
+        _minAltitude.value = v.coerceIn(0f, _maxAltitude.value)
+    }
+    fun setMaxAltitude(v: Float) {
+        _maxAltitude.value = v.coerceIn(_minAltitude.value, 5000f)
+    }
+
+    // ── Auto altitude from map data toggle ─────────────────────
+    private val _useAutoAltitude = MutableStateFlow(false)
+    val useAutoAltitude: StateFlow<Boolean> = _useAutoAltitude.asStateFlow()
+
+    fun setUseAutoAltitude(enabled: Boolean) {
+        _useAutoAltitude.value = enabled
+    }
+
     // ── Public API ────────────────────────────────────────────
 
     fun setMapCenter(latLng: LatLng) {
         _mapCenter.value = latLng
+    }
+
+    fun zoomIn() {
+        _mapZoom.value = (_mapZoom.value + 1.0).coerceAtMost(19.0)
+    }
+
+    fun zoomOut() {
+        _mapZoom.value = (_mapZoom.value - 1.0).coerceAtLeast(2.0)
     }
 
     /** Toggle between placing START or END marker. */
@@ -359,19 +393,24 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
                 val position = from.interpolateTo(to, t)
                 val bearing = from.bearingTo(to)
 
+                // ── Altitude from sinusoidal profile or map data ────
+                val overallT = (state.segmentIndex + t) / totalSegments
+                val altitude = computeAltitude(overallT.toFloat(), route)
+
                 // ── Update state ─────────────────────────────────────
                 state = state.copy(
                     segmentIndex = state.segmentIndex,
                     segmentProgress = t.toFloat(),
-                    overallProgress = ((state.segmentIndex + t) / totalSegments).toFloat(),
+                    overallProgress = overallT.toFloat(),
                     currentPosition = position,
                     currentBearing = bearing,
                     simulatedSpeedKmh = currentSpeedKmh,
+                    currentAltitude = altitude,
                     elapsedSeconds = state.elapsedSeconds + (intervalMs / 1000L)
                 )
                 _simulation.value = state
 
-                injectMockLocation(position, bearing, currentSpeedKmh)
+                injectMockLocation(position, bearing, currentSpeedKmh, altitude)
                 delay(intervalMs)
             }
 
@@ -386,26 +425,29 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         if (state.status == SimulationStatus.PLAYING) {
             val lastPos = points.last()
             val finalBearing = if (points.size >= 2) points[points.size - 2].bearingTo(lastPos) else 0f
-            injectMockLocation(lastPos, finalBearing, 0f)
+            val finalAlt = computeAltitude(1f, route)
+            injectMockLocation(lastPos, finalBearing, 0f, finalAlt)
             state = state.copy(
                 status = SimulationStatus.IDLE,
                 currentPosition = lastPos,
                 overallProgress = 1f,
                 segmentIndex = totalSegments,
                 segmentProgress = 1f,
-                simulatedSpeedKmh = 0f
+                simulatedSpeedKmh = 0f,
+                currentAltitude = finalAlt
             )
             _simulation.value = state
         }
     }
 
     /** Inject a mock location into Android's LocationManager. */
-    private fun injectMockLocation(latLng: LatLng, bearing: Float, speedKmh: Float) {
+    private fun injectMockLocation(latLng: LatLng, bearing: Float, speedKmh: Float, altitude: Double) {
         val context = getApplication<Application>()
         try {
             val location = Location(LocationManager.GPS_PROVIDER).apply {
                 latitude = latLng.latitude
                 longitude = latLng.longitude
+                this.altitude = altitude
                 accuracy = 3f
                 this.bearing = bearing
                 speed = speedKmh / 3.6f
@@ -429,6 +471,37 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             _errorMessage.value = "Mock location not granted. Go to: Developer Options \u2192 Select mock location app \u2192 choose MockLocation"
         } catch (_: Exception) {
             // Ignore transient errors
+        }
+    }
+
+    /** Compute altitude at given progress point.
+     *  When auto-altitude is ON, it generates a natural terrain profile
+     *  combining multiple sine waves for realistic feel.
+     *  If real OSRM elevation data is available, it interpolates that instead.
+     *  Otherwise it falls back to a sinusoidal oscillation between min/max. */
+    private fun computeAltitude(overallProgress: Float, route: Route): Double {
+        // Auto mode: use real OSRM elevation data if available
+        if (_useAutoAltitude.value && route.hasElevation) {
+            val idx = (overallProgress * (route.elevations.size - 1)).toInt()
+                .coerceIn(0, route.elevations.size - 1)
+            val frac = (overallProgress * (route.elevations.size - 1)) - idx
+            val nextIdx = (idx + 1).coerceAtMost(route.elevations.size - 1)
+            return route.elevations[idx] * (1.0 - frac) + route.elevations[nextIdx] * frac
+        }
+        val minAlt = _minAltitude.value.toDouble()
+        val maxAlt = _maxAltitude.value.toDouble()
+        if (minAlt >= maxAlt) return minAlt
+        val amplitude = (maxAlt - minAlt) / 2.0
+        val midpoint = (minAlt + maxAlt) / 2.0
+        return if (_useAutoAltitude.value) {
+            // Natural terrain: multi-frequency oscillation for realistic feel
+            midpoint
+                + amplitude * 0.6 * kotlin.math.sin(overallProgress * 2.0 * Math.PI + Math.PI / 2)
+                + amplitude * 0.3 * kotlin.math.sin(overallProgress * 5.0 * Math.PI)
+                + amplitude * 0.1 * kotlin.math.sin(overallProgress * 11.0 * Math.PI + Math.PI / 3)
+        } else {
+            // Manual: clean 2-cycle sine between DA/A
+            midpoint + amplitude * kotlin.math.sin(overallProgress * 4.0 * Math.PI + Math.PI / 2)
         }
     }
 

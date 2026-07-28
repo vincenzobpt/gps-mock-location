@@ -17,12 +17,14 @@ data class SimulationState(
     val currentBearing: Float = 0f,
     /** Target simulation speed in km/h (chosen via range slider). */
     val targetSpeedKmh: Float = 40f,
+    /** Current speed in km/h being simulated. */
+    val simulatedSpeedKmh: Float = 0f,
+    /** Current altitude in meters (simulated from min/max range). */
+    val currentAltitude: Double = 0.0,
     /** GPS update interval in milliseconds. */
-    val updateIntervalMs: Long = 1000L,
+    val updateIntervalMs: Long = 200L,
     /** Elapsed simulation time in seconds. */
     val elapsedSeconds: Long = 0L,
     /** Total route distance in meters. */
-    val totalDistanceMeters: Double = 0.0,
-    /** Current speed in km/h being simulated. */
-    val simulatedSpeedKmh: Float = 0f
+    val totalDistanceMeters: Double = 0.0
 )
