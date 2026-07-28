@@ -15,8 +15,8 @@ data class SimulationState(
     val currentPosition: LatLng? = null,
     /** Current bearing in degrees. */
     val currentBearing: Float = 0f,
-    /** Playback multiplier (1 = real-time estimated speed). */
-    val speedMultiplier: Float = 1f,
+    /** Target simulation speed in km/h (chosen via range slider). */
+    val targetSpeedKmh: Float = 40f,
     /** GPS update interval in milliseconds. */
     val updateIntervalMs: Long = 1000L,
     /** Elapsed simulation time in seconds. */

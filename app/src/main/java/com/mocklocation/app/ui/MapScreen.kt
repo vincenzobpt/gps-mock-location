@@ -37,6 +37,7 @@ import com.mocklocation.app.model.Route
 import com.mocklocation.app.model.SimulationState
 import com.mocklocation.app.model.SimulationStatus
 import com.mocklocation.app.viewmodel.MapViewModel
+import kotlin.math.roundToInt
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -63,12 +64,15 @@ fun MapScreen(viewModel: MapViewModel) {
     val isCalculating by viewModel.isCalculatingRoute.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val simulation by viewModel.simulation.collectAsStateWithLifecycle()
+    val searchSuggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
+    val minSpeed by viewModel.minSpeedKmh.collectAsStateWithLifecycle()
+    val maxSpeed by viewModel.maxSpeedKmh.collectAsStateWithLifecycle()
     val mapCenter by viewModel.mapCenter.collectAsStateWithLifecycle()
-    var showAbout by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val mapViewRef = remember { mutableStateOf<MapView?>(null) }
+    var showAbout by remember { mutableStateOf(false) }
 
     // ── osmdroid lifecycle ─────────────────────────────────────
     DisposableEffect(lifecycleOwner) {
@@ -115,11 +119,13 @@ fun MapScreen(viewModel: MapViewModel) {
                 isCalculating = isCalculating,
                 hasStart = startPoint != null,
                 hasEnd = endPoint != null,
-                speedOptions = viewModel.speedOptions,
+                minSpeed = minSpeed,
+                maxSpeed = maxSpeed,
+                onMinSpeedChange = viewModel::setMinSpeed,
+                onMaxSpeedChange = viewModel::setMaxSpeed,
                 onPlay = viewModel::playSimulation,
                 onPause = viewModel::pauseSimulation,
                 onStop = viewModel::stopSimulation,
-                onSpeedChange = viewModel::setSpeedMultiplier,
                 onClearAll = viewModel::clearAll,
                 onCalculate = viewModel::calculateRoute,
                 onCycleMarkerMode = viewModel::cycleMarkerMode
@@ -516,11 +522,13 @@ private fun BottomControls(
     isCalculating: Boolean,
     hasStart: Boolean,
     hasEnd: Boolean,
-    speedOptions: List<Float>,
+    minSpeed: Float,
+    maxSpeed: Float,
+    onMinSpeedChange: (Float) -> Unit,
+    onMaxSpeedChange: (Float) -> Unit,
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onStop: () -> Unit,
-    onSpeedChange: (Float) -> Unit,
     onClearAll: () -> Unit,
     onCalculate: () -> Unit,
     onCycleMarkerMode: () -> Unit
@@ -671,13 +679,14 @@ private fun BottomControls(
                 }
             }
 
-            // ── Row 3: speed selector ────────────────────────────
+            // ── Row 3: speed bounds sliders ────────────────────────
             if (route != null) {
                 Spacer(Modifier.height(10.dp))
-                SpeedSelector(
-                    currentSpeed = simulation.speedMultiplier,
-                    options = speedOptions,
-                    onSelect = onSpeedChange
+                SpeedSliders(
+                    minSpeed = minSpeed,
+                    maxSpeed = maxSpeed,
+                    onMinSpeedChange = onMinSpeedChange,
+                    onMaxSpeedChange = onMaxSpeedChange
                 )
             }
         }
@@ -685,50 +694,89 @@ private fun BottomControls(
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SPEED SELECTOR
+//  SPEED SLIDERS — DA (min) / A (max) 0-240 km/h
 // ═══════════════════════════════════════════════════════════════
 
 @Composable
-private fun SpeedSelector(
-    currentSpeed: Float,
-    options: List<Float>,
-    onSelect: (Float) -> Unit
+private fun SpeedSliders(
+    minSpeed: Float,
+    maxSpeed: Float,
+    onMinSpeedChange: (Float) -> Unit,
+    onMaxSpeedChange: (Float) -> Unit
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Surface(
-            shape = RoundedCornerShape(6.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant
-        ) {
+    Column {
+        // Header
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Text(
+                    text = "\u26A1 Speed",
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(Modifier.width(8.dp))
+
             Text(
-                text = "\u26A1 Speed",
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                text = "${minSpeed.toInt()} - ${maxSpeed.toInt()} km/h",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
             )
         }
 
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.height(8.dp))
 
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(options) { speed ->
-                val selected = currentSpeed == speed
-                FilterChip(
-                    selected = selected,
-                    onClick = { onSelect(speed) },
-                    label = {
-                        Text(
-                            text = "${speed.toInt()}\u00D7",
-                            fontSize = 12.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                        )
-                    },
-                    shape = RoundedCornerShape(8.dp),
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = MaterialTheme.colorScheme.primary,
-                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-                    )
-                )
-            }
+        // DA slider
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "DA",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(28.dp)
+            )
+            Slider(
+                value = minSpeed,
+                onValueChange = onMinSpeedChange,
+                valueRange = 0f..240f,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "${minSpeed.toInt()}",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.width(40.dp)
+            )
+        }
+
+        // A slider
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "A",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(28.dp)
+            )
+            Slider(
+                value = maxSpeed,
+                onValueChange = onMaxSpeedChange,
+                valueRange = 0f..240f,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "${maxSpeed.toInt()}",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.width(40.dp)
+            )
         }
     }
 }
@@ -787,12 +835,6 @@ private fun SimulationInfoOverlay(
                     text = "${simulation.simulatedSpeedKmh.toInt()} km/h",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color.White.copy(alpha = 0.8f)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "${simulation.speedMultiplier.toInt()}\u00D7",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White.copy(alpha = 0.6f)
                 )
             }
 

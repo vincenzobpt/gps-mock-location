@@ -155,8 +155,19 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-    // ── Speed options ──────────────────────────────────────────
-    val speedOptions = listOf(0.5f, 1f, 2f, 5f, 10f, 50f)
+    // ── Speed bounds (km/h) ────────────────────────────────────
+    private val _minSpeedKmh = MutableStateFlow(0f)
+    val minSpeedKmh: StateFlow<Float> = _minSpeedKmh.asStateFlow()
+
+    private val _maxSpeedKmh = MutableStateFlow(240f)
+    val maxSpeedKmh: StateFlow<Float> = _maxSpeedKmh.asStateFlow()
+
+    fun setMinSpeed(v: Float) {
+        _minSpeedKmh.value = v.coerceIn(0f, _maxSpeedKmh.value)
+    }
+    fun setMaxSpeed(v: Float) {
+        _maxSpeedKmh.value = v.coerceIn(_minSpeedKmh.value, 240f)
+    }
 
     // ── Public API ────────────────────────────────────────────
 
@@ -227,7 +238,13 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        _simulation.value = _simulation.value.copy(status = SimulationStatus.PLAYING)
+        // Reset simulation state completely before starting,
+        // otherwise if the route was previously completed (segmentIndex == totalSegments)
+        // the while loop in runSimulation() exits immediately.
+        _simulation.value = SimulationState(
+            status = SimulationStatus.PLAYING,
+            totalDistanceMeters = route.distanceMeters
+        )
         simulationJob?.cancel()
         simulationJob = viewModelScope.launch {
             runSimulation(route)
@@ -242,10 +259,6 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     fun stopSimulation() {
         simulationJob?.cancel()
         _simulation.value = SimulationState()
-    }
-
-    fun setSpeedMultiplier(multiplier: Float) {
-        _simulation.value = _simulation.value.copy(speedMultiplier = multiplier)
     }
 
     fun clearError() {
@@ -274,29 +287,38 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Core simulation loop: steps through route points, injecting mock locations.
+     * Core simulation loop: steps through route points, injecting mock locations
+     * with natural speed variation between the selected min/max bounds.
+     * Speed starts from DA (min), accelerates, and slows down on curves.
+     * Speed is updated on every sub-step for smooth acceleration.
      */
     private suspend fun runSimulation(route: Route) {
         val points = route.points
         val totalSegments = points.size - 1
+        val rng = java.util.Random()
+        val curveLimits = calculateCurveSpeedLimits(points)
 
         var state = _simulation.value.copy(
             totalDistanceMeters = route.distanceMeters
         )
+
+        val intervalMs = state.updateIntervalMs
+        val intervalSec = intervalMs / 1000.0
+        val accelPerStep = 8f * intervalSec.toFloat()     // km/h gained per sub-step
+        val brakePerStep = 12f * intervalSec.toFloat()    // km/h lost per sub-step
+
+        var currentSpeedKmh = _minSpeedKmh.value                // start from DA
+        var targetSpeedKmh = currentSpeedKmh
+        var msSinceTargetChange = 0L
 
         while (state.segmentIndex < totalSegments && state.status == SimulationStatus.PLAYING) {
             val from = points[state.segmentIndex]
             val to = points[state.segmentIndex + 1]
             val segDist = from.distanceTo(to)
 
-            // Determine realistic speed for this segment
-            val segDuration = route.durationSeconds * (segDist / route.distanceMeters)
-            val baseSpeedMs = if (segDuration > 0) segDist / segDuration else 14.0 // ~50 km/h fallback
-            val speedMs = baseSpeedMs * state.speedMultiplier
-            val speedKmh = (speedMs * 3.6).toFloat()
+            val speedMs = (currentSpeedKmh / 3.6).toDouble()
 
-            // Sub-steps for smooth movement
-            val intervalSec = state.updateIntervalMs / 1000.0
+            // Number of sub-steps for this segment at current speed
             val stepsInSegment = if (speedMs > 0) {
                 maxOf(1L, (segDist / (speedMs * intervalSec)).toLong())
             } else {
@@ -306,26 +328,51 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             for (step in 0 until stepsInSegment) {
                 if (state.status != SimulationStatus.PLAYING) break
 
-                val t = if (stepsInSegment > 1) step.toDouble() / (stepsInSegment - 1) else 0.0
+                // ── Time-based target change (every 4-8 seconds) ──────
+                msSinceTargetChange += intervalMs
+                if (msSinceTargetChange >= 4000 + rng.nextInt(4001)) {
+                    msSinceTargetChange = 0L
+                    val boundMin = _minSpeedKmh.value
+                    val boundMax = _maxSpeedKmh.value
+                    val limitAhead = if (state.segmentIndex + 1 < curveLimits.size)
+                        curveLimits[state.segmentIndex + 1] else Float.MAX_VALUE
+                    val safeMax = minOf(boundMax, limitAhead)
+                    targetSpeedKmh = if (safeMax > boundMin)
+                        boundMin + rng.nextFloat() * (safeMax - boundMin)
+                    else boundMin
+                }
+
+                // ── Smooth acceleration / braking on every sub-step ──
+                val delta = if (currentSpeedKmh < targetSpeedKmh) accelPerStep else brakePerStep
+                currentSpeedKmh = when {
+                    currentSpeedKmh < targetSpeedKmh ->
+                        minOf(currentSpeedKmh + delta, targetSpeedKmh)
+                    currentSpeedKmh > targetSpeedKmh ->
+                        maxOf(currentSpeedKmh - delta, targetSpeedKmh)
+                    else -> currentSpeedKmh
+                }
+                // Never drop below the lower bound
+                currentSpeedKmh = maxOf(currentSpeedKmh, _minSpeedKmh.value)
+
+                // ── Position interpolation ────────────────────────────
+                val t = if (stepsInSegment > 1) (step + 1).toDouble() / stepsInSegment else 1.0
                 val position = from.interpolateTo(to, t)
                 val bearing = from.bearingTo(to)
 
+                // ── Update state ─────────────────────────────────────
                 state = state.copy(
                     segmentIndex = state.segmentIndex,
                     segmentProgress = t.toFloat(),
                     overallProgress = ((state.segmentIndex + t) / totalSegments).toFloat(),
                     currentPosition = position,
                     currentBearing = bearing,
-                    simulatedSpeedKmh = speedKmh,
-                    elapsedSeconds = state.elapsedSeconds + (intervalSec.toLong()).toLong()
+                    simulatedSpeedKmh = currentSpeedKmh,
+                    elapsedSeconds = state.elapsedSeconds + (intervalMs / 1000L)
                 )
                 _simulation.value = state
 
-                injectMockLocation(position, bearing, speedKmh)
-
-                // Wait — speed up by reducing delay proportionally
-                val actualDelay = (state.updateIntervalMs / state.speedMultiplier).toLong().coerceAtLeast(50L)
-                delay(actualDelay)
+                injectMockLocation(position, bearing, currentSpeedKmh)
+                delay(intervalMs)
             }
 
             // Advance to next segment
@@ -383,5 +430,32 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         } catch (_: Exception) {
             // Ignore transient errors
         }
+    }
+
+    /**
+     * Pre-compute speed limit for each route point based on corner sharpness.
+     * Uses a running average of bearing changes over a 5-point window to
+     * avoid noise from closely-spaced OSRM points.
+     */
+    private fun calculateCurveSpeedLimits(points: List<LatLng>): List<Float> {
+        if (points.size < 5) return points.map { Float.MAX_VALUE }
+        val limits = MutableList(points.size) { Float.MAX_VALUE }
+        // Window = look 3 points ahead & behind to compute a smoothed bearing
+        for (i in 3 until points.size - 3) {
+            val before = points[i - 3].bearingTo(points[i])
+            val after = points[i].bearingTo(points[i + 3])
+            var diff = (after - before + 540f) % 360f - 180f
+            val absAngle = kotlin.math.abs(diff)
+            limits[i] = when {
+                absAngle < 8f  -> Float.MAX_VALUE // straight
+                absAngle < 15f -> 140f
+                absAngle < 25f -> 100f
+                absAngle < 35f -> 70f
+                absAngle < 50f -> 45f
+                absAngle < 70f -> 25f
+                else           -> 15f
+            }
+        }
+        return limits
     }
 }
