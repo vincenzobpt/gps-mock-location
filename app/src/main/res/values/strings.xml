@@ -1,17 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">GPS Mock Location</string>
-    <string name="start_point">Start point</string>
-    <string name="end_point">End point</string>
-    <string name="calculate_route">Calculate Route</string>
-    <string name="play">Play</string>
-    <string name="pause">Pause</string>
-    <string name="stop">Stop</string>
-    <string name="speed">Speed</string>
-    <string name="select_start">Long-press map to set START point</string>
-    <string name="select_end">Long-press map to set END point</string>
-    <string name="clear_route">Clear</string>
-    <string name="route_not_found">Route not found. Try different points.</string>
     <string name="channel_simulation">GPS Simulation</string>
-    <string name="simulation_running">Simulation running…</string>
 </resources>

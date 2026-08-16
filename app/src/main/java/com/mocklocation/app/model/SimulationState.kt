@@ -1,30 +1,93 @@
 package com.mocklocation.app.model
 
-/** Current simulation state. */
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+/** Lifecycle of the simulation loop. */
 enum class SimulationStatus { IDLE, PLAYING, PAUSED }
 
+/**
+ * Everything the UI (and the notification) needs to render one instant of the
+ * simulation. Produced by `SimulationEngine` at the GPS tick rate.
+ *
+ * The single source of truth for progress is [distanceTraveledMeters] — an
+ * arc-length along the route, not a segment index — so pause/resume, speed
+ * changes and variable tick rates all stay consistent.
+ */
 data class SimulationState(
     val status: SimulationStatus = SimulationStatus.IDLE,
-    /** Index into the route points currently being approached. */
-    val segmentIndex: Int = 0,
-    /** Sub-segment progress 0..1 within the current segment. */
-    val segmentProgress: Float = 0f,
-    /** Overall progress 0..1 along the full route. */
-    val overallProgress: Float = 0f,
-    /** Current simulated position (may be null before first tick). */
-    val currentPosition: LatLng? = null,
-    /** Current bearing in degrees. */
-    val currentBearing: Float = 0f,
-    /** Target simulation speed in km/h (chosen via range slider). */
-    val targetSpeedKmh: Float = 40f,
-    /** Current speed in km/h being simulated. */
-    val simulatedSpeedKmh: Float = 0f,
-    /** Current altitude in meters (simulated from min/max range). */
-    val currentAltitude: Double = 0.0,
-    /** GPS update interval in milliseconds. */
+
+    // ── Position fix ────────────────────────────────────────────
+    val position: LatLng? = null,
+    /** Position actually injected, including GPS jitter (may differ from [position]). */
+    val injectedPosition: LatLng? = null,
+    val bearingDegrees: Float = 0f,
+    val altitudeMeters: Double = 0.0,
+    val accuracyMeters: Float = 3f,
+
+    // ── Kinematics ──────────────────────────────────────────────
+    val speedKmh: Float = 0f,
+    val targetSpeedKmh: Float = 0f,
+    /** Speed cap imposed by the upcoming curve, in km/h. */
+    val curveLimitKmh: Float = 0f,
+    val accelerationMs2: Float = 0f,
+
+    // ── Route progress ──────────────────────────────────────────
+    val distanceTraveledMeters: Double = 0.0,
+    val totalDistanceMeters: Double = 0.0,
+    /** Index of the last route vertex passed — used to split the polyline. */
+    val pointIndex: Int = 0,
+    val elapsedMillis: Long = 0L,
+
+    // ── Fix / receiver telemetry ("nerd info") ──────────────────
+    val fixCount: Long = 0L,
     val updateIntervalMs: Long = 200L,
-    /** Elapsed simulation time in seconds. */
-    val elapsedSeconds: Long = 0L,
-    /** Total route distance in meters. */
-    val totalDistanceMeters: Double = 0.0
-)
+    val satellitesInView: Int = 0,
+    val satellitesUsed: Int = 0,
+    val hdop: Float = 0f,
+    /** Providers currently receiving injected fixes (gps, network, fused). */
+    val activeProviders: List<String> = emptyList(),
+    val lastFixWallClockMs: Long = 0L,
+    /** Non-null when the platform refused the last injection. */
+    val injectionError: String? = null,
+) {
+    val isActive: Boolean get() = status != SimulationStatus.IDLE
+
+    val progress: Float
+        get() = if (totalDistanceMeters > 0.0)
+            (distanceTraveledMeters / totalDistanceMeters).toFloat().coerceIn(0f, 1f)
+        else 0f
+
+    val remainingMeters: Double
+        get() = (totalDistanceMeters - distanceTraveledMeters).coerceAtLeast(0.0)
+
+    val speedMs: Float get() = speedKmh / 3.6f
+
+    val elapsedSeconds: Long get() = elapsedMillis / 1000L
+
+    /** Seconds to destination at the current speed; null while stopped. */
+    val etaSeconds: Long?
+        get() {
+            val v = speedMs
+            return if (v > 0.3f) (remainingMeters / v).roundToInt().toLong() else null
+        }
+
+    val updateRateHz: Float
+        get() = if (updateIntervalMs > 0) 1000f / updateIntervalMs else 0f
+
+    /** 16-point compass abbreviation for [bearingDegrees]. */
+    val cardinal: String
+        get() {
+            val dirs = arrayOf(
+                "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
+            )
+            val idx = (((bearingDegrees % 360f) + 360f) % 360f / 22.5f).roundToInt() % 16
+            return dirs[idx]
+        }
+
+    /** Rough vertical rate in m/s is not tracked; expose slope sign instead. */
+    val isAccelerating: Boolean get() = accelerationMs2 > 0.05f
+    val isBraking: Boolean get() = accelerationMs2 < -0.05f
+    val isCruising: Boolean get() = abs(accelerationMs2) <= 0.05f
+}

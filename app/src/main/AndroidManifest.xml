@@ -4,18 +4,26 @@
 
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_MOCK_LOCATION"
-        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      ACCESS_MOCK_LOCATION is intentionally NOT declared: it is a signature
+      permission that has been inert since Android 6. Mock injection is gated by
+      the OP_MOCK_LOCATION app-op, which the user grants in
+      Developer options -> Select mock location app.
+    -->
 
     <application
         android:name=".MockLocationApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MockLocation"
         android:networkSecurityConfig="@xml/network_security_config"
@@ -24,6 +32,8 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:theme="@style/Theme.MockLocation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -34,6 +44,7 @@
         <service
             android:name=".service.MockLocationService"
             android:foregroundServiceType="location"
-            android:exported="false" />
+            android:exported="false"
+            android:stopWithTask="false" />
     </application>
 </manifest>
