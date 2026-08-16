@@ -12,11 +12,25 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!--
-      ACCESS_MOCK_LOCATION is intentionally NOT declared: it is a signature
-      permission that has been inert since Android 6. Mock injection is gated by
-      the OP_MOCK_LOCATION app-op, which the user grants in
-      Developer options -> Select mock location app.
+      REQUIRED, and not for the reason it looks like.
+
+      As a permission this is inert: it is signature-level, never granted to a
+      normal app, and injection is actually gated by the OP_MOCK_LOCATION
+      app-op. But Settings' AppPicker builds the "Select mock location app"
+      list by scanning each package's requestedPermissions for this exact
+      name and skipping anything that does not declare it. Remove the line and
+      the app silently disappears from that list — with no error anywhere.
     -->
+    <!--
+      Both lint checks are suppressed on purpose: ProtectedPermissions because
+      the declaration is a marker rather than a grant, and MockLocation because
+      its advice ("move this to a debug-only manifest") assumes an app that
+      mocks location for its own tests. Here mocking location *is* the shipped
+      product, so it belongs in the main manifest.
+    -->
+    <uses-permission
+        android:name="android.permission.ACCESS_MOCK_LOCATION"
+        tools:ignore="ProtectedPermissions,MockLocation" />
 
     <application
         android:name=".MockLocationApp"
