@@ -8,6 +8,7 @@ import com.mocklocation.app.model.Route
 import com.mocklocation.app.model.SimulationConfig
 import com.mocklocation.app.model.SimulationState
 import com.mocklocation.app.model.SimulationStatus
+import com.mocklocation.app.model.Waypoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -68,6 +69,13 @@ class SimulationEngine(
     private var elapsedMs = 0L
     private var fixCount = 0L
 
+    /** Intermediate stops, resolved to arc length along the route. */
+    private var stops: List<Stop> = emptyList()
+    private var nextStopIndex = 0
+    private var dwellRemainingMs = 0L
+
+    private data class Stop(val distanceMeters: Double, val dwellSeconds: Long)
+
     // ── Configuration ───────────────────────────────────────────
 
     fun updateConfig(transform: (SimulationConfig) -> SimulationConfig) {
@@ -85,15 +93,33 @@ class SimulationEngine(
         if (_state.value.status == SimulationStatus.IDLE) mockLocation.stop()
     }
 
-    /** Installs a new route. Resets progress; stops any run in flight. */
-    fun setRoute(route: Route?) {
+    /** Installs a new route and its intermediate stops. Resets progress. */
+    fun setRoute(route: Route?, waypoints: List<Waypoint> = emptyList()) {
         stop()
-        geometry = route?.let(::RouteGeometry)?.takeIf { it.isUsable }
+        val geo = route?.let(::RouteGeometry)?.takeIf { it.isUsable }
+        geometry = geo
+
+        // Snap each stop onto the geometry OSRM returned and keep them ordered
+        // by arc length: the user may drop stops in any order on the map, but
+        // the simulation can only meet them in the order it drives past them.
+        stops = if (geo == null) emptyList() else waypoints
+            .map { Stop(geo.arcLengthNearest(it.latLng), it.stayDurationSeconds) }
+            .filter { it.dwellSeconds > 0 }
+            .sortedBy { it.distanceMeters }
+
         _state.value = SimulationState(
-            totalDistanceMeters = geometry?.totalMeters ?: 0.0,
+            totalDistanceMeters = geo?.totalMeters ?: 0.0,
             updateIntervalMs = _config.value.intervalMs,
         )
     }
+
+    /** Arc-length positions of the stops, as fractions of the route. */
+    val stopFractions: List<Float>
+        get() {
+            val total = geometry?.totalMeters ?: return emptyList()
+            if (total <= 0.0) return emptyList()
+            return stops.map { (it.distanceMeters / total).toFloat().coerceIn(0f, 1f) }
+        }
 
     val elevationProfile: List<Double>?
         get() = geometry?.elevationProfile(PROFILE_SAMPLES)
@@ -163,6 +189,9 @@ class SimulationEngine(
         val geo = geometry ?: return
         distanceMeters = (geo.totalMeters * fraction.coerceIn(0f, 1f))
         speedMs = 0.0
+        dwellRemainingMs = 0L
+        // Stops behind the new position are already served.
+        nextStopIndex = stops.count { it.distanceMeters <= distanceMeters }
         publish(geo, accelerationMs2 = 0f)
     }
 
@@ -176,6 +205,8 @@ class SimulationEngine(
         jitterLat = 0.0
         jitterLon = 0.0
         satellites = 11
+        nextStopIndex = 0
+        dwellRemainingMs = 0L
     }
 
     // ── The loop ────────────────────────────────────────────────
@@ -187,8 +218,31 @@ class SimulationEngine(
             val dt = dtMs / 1000.0
 
             val previousSpeed = speedMs
+
+            if (dwellRemainingMs > 0L) {
+                // Standing at a stop. Fixes keep flowing — a receiver that goes
+                // silent while parked is exactly what a real one does not do.
+                dwellRemainingMs -= dtMs
+                speedMs = 0.0
+                elapsedMs += dtMs
+                publish(geo, accelerationMs2 = 0f)
+                inject()
+                delay(dtMs)
+                continue
+            }
+
             step(geo, cfg, dt, dtMs)
             val accel = ((speedMs - previousSpeed) / dt).toFloat()
+
+            // Reached the next stop?
+            stops.getOrNull(nextStopIndex)?.let { stop ->
+                if (distanceMeters >= stop.distanceMeters) {
+                    distanceMeters = stop.distanceMeters
+                    speedMs = 0.0
+                    dwellRemainingMs = stop.dwellSeconds * 1000L
+                    nextStopIndex++
+                }
+            }
 
             publish(geo, accel)
             inject()
@@ -196,6 +250,7 @@ class SimulationEngine(
             if (distanceMeters >= geo.totalMeters - 0.01) {
                 if (cfg.loopRoute) {
                     distanceMeters = 0.0
+                    nextStopIndex = 0
                 } else {
                     finish(geo)
                     return
@@ -217,10 +272,13 @@ class SimulationEngine(
             if (limitKmh == Float.MAX_VALUE) maxMs else (limitKmh / 3.6).toDouble()
         } else maxMs
 
-        // Arrival ceiling: v = sqrt(2 * a * remaining) so we coast to a stop
-        // exactly on the destination instead of teleporting to it.
-        val remaining = (geo.totalMeters - distanceMeters).coerceAtLeast(0.0)
-        val arrivalMs = if (cfg.loopRoute) maxMs else sqrt(2.0 * BRAKE_MS2 * remaining)
+        // Arrival ceiling: v = sqrt(2 * a * remaining) so we coast to a halt
+        // exactly on the next thing we must stop at — an intermediate stop if
+        // there is one ahead, otherwise the destination.
+        val nextHalt = stops.getOrNull(nextStopIndex)?.distanceMeters ?: geo.totalMeters
+        val remaining = (nextHalt - distanceMeters).coerceAtLeast(0.0)
+        val arrivalMs = if (cfg.loopRoute && nextStopIndex >= stops.size) maxMs
+        else sqrt(2.0 * BRAKE_MS2 * remaining)
 
         val ceiling = min(min(maxMs, curveMs), arrivalMs)
 
@@ -285,6 +343,9 @@ class SimulationEngine(
             totalDistanceMeters = geo.totalMeters,
             pointIndex = geo.indexAt(distanceMeters),
             elapsedMillis = elapsedMs,
+            stopsTotal = stops.size,
+            stopsServed = nextStopIndex.coerceAtMost(stops.size),
+            dwellRemainingSeconds = (dwellRemainingMs + 999L) / 1000L,
             fixCount = fixCount,
             updateIntervalMs = cfg.intervalMs,
             satellitesInView = (satellites + 6).coerceAtMost(24),

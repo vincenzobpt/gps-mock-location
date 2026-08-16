@@ -43,12 +43,18 @@ class OsrmRepository {
     }
 
     /**
-     * Fetch a driving route between [start] and [end].
-     * @return [Route] on success, null on error / no route.
+     * Fetch a driving route through [points], in order.
+     *
+     * OSRM takes an arbitrary number of semicolon-separated coordinates, so
+     * intermediate stops cost nothing extra: they are simply extra points
+     * between the origin and the destination.
      */
-    suspend fun getRoute(start: LatLng, end: LatLng): Result<Route> = withContext(Dispatchers.IO) {
+    suspend fun getRoute(points: List<LatLng>): Result<Route> = withContext(Dispatchers.IO) {
+        if (points.size < 2) {
+            return@withContext Result.failure(IllegalArgumentException("A route needs at least two points"))
+        }
         try {
-            val coords = "${start.longitude},${start.latitude};${end.longitude},${end.latitude}"
+            val coords = points.joinToString(";") { "${it.longitude},${it.latitude}" }
             val response = api.getRoute(coords)
             if (response.code == "Ok" && !response.routes.isNullOrEmpty()) {
                 val route = response.routes.first()

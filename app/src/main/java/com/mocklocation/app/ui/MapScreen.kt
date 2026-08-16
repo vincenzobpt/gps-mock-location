@@ -15,6 +15,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -56,6 +57,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mocklocation.app.location.MockLocationEngine
+import com.mocklocation.app.model.MapTheme
 import com.mocklocation.app.model.MarkerMode
 import com.mocklocation.app.model.SimulationStatus
 import com.mocklocation.app.ui.theme.Cockpit
@@ -83,11 +85,17 @@ fun MapScreen(viewModel: MapViewModel) {
     val isSearching by viewModel.isSearching.collectAsStateWithLifecycle()
     val cameraCommand by viewModel.cameraCommand.collectAsStateWithLifecycle()
     val followVehicle by viewModel.followVehicle.collectAsStateWithLifecycle()
-    val nightMap by viewModel.nightMap.collectAsStateWithLifecycle()
+    val waypoints by viewModel.waypoints.collectAsStateWithLifecycle()
+    val mapTheme by viewModel.mapTheme.collectAsStateWithLifecycle()
+
+    // SYSTEM resolves here, where Compose already tracks the configuration, so
+    // the map follows a theme change without a restart.
+    val systemInDark = isSystemInDarkTheme()
+    val nightMap = mapTheme.isDark(systemInDark)
 
     var mapView by remember { mutableStateOf<MapView?>(null) }
     var consoleExpanded by remember { mutableStateOf(false) }
-    var consoleTab by remember { mutableStateOf(ConsoleTab.TELEMETRY) }
+    var consoleTab by remember { mutableStateOf(ConsoleTab.ROUTE) }
     var showAbout by remember { mutableStateOf(false) }
     var permissionsGranted by remember { mutableStateOf(hasLocationPermission(context)) }
 
@@ -168,6 +176,7 @@ fun MapScreen(viewModel: MapViewModel) {
             simulation = simulation,
             startPoint = startPoint,
             endPoint = endPoint,
+            waypoints = waypoints.map { it.latLng },
             nightMode = nightMap,
             onLongPress = viewModel::onMapLongPress,
             onUserPan = { if (followVehicle) viewModel.setFollowVehicle(false) },
@@ -256,8 +265,8 @@ fun MapScreen(viewModel: MapViewModel) {
                 markerMode = markerMode,
                 hasStart = startPoint != null,
                 hasEnd = endPoint != null,
-                simulationStatus = simulation.status,
-                fixCount = simulation.fixCount,
+                stopCount = waypoints.size,
+                simulation = simulation,
                 onModeClick = viewModel::cycleMarkerMode,
             )
 
@@ -317,7 +326,11 @@ fun MapScreen(viewModel: MapViewModel) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 horizontalAlignment = Alignment.End,
             ) {
-                RailButton("☾", onClick = viewModel::toggleNightMap, active = nightMap)
+                RailButton(
+                    glyph = if (nightMap) "☾" else "☀",
+                    onClick = { viewModel.toggleMapTheme(systemInDark) },
+                    active = nightMap,
+                )
                 RailButton("⤢", onClick = viewModel::requestFitRoute)
                 RailButton(
                     glyph = "◎",
@@ -345,6 +358,9 @@ fun MapScreen(viewModel: MapViewModel) {
             // Resampling the profile is O(n log n); it only changes with the
             // route, never with the fix, so it must not run at the tick rate.
             elevationProfile = remember(route) { viewModel.elevationProfile },
+            waypoints = waypoints,
+            stopFractions = remember(route, waypoints) { viewModel.stopFractions },
+            mapTheme = mapTheme,
             expanded = consoleExpanded,
             tab = consoleTab,
             isCalculating = isCalculating,
@@ -358,6 +374,15 @@ fun MapScreen(viewModel: MapViewModel) {
             onClear = viewModel::clearAll,
             onSwap = viewModel::swapEndpoints,
             onConfigChange = viewModel::updateConfig,
+            onRemoveWaypoint = viewModel::removeWaypoint,
+            onCycleDwell = viewModel::cycleWaypointDwell,
+            onClearWaypoints = viewModel::clearWaypoints,
+            onMapThemeChange = viewModel::setMapTheme,
+            onAddStopHint = {
+                // Arm the gesture and get out of the way so the map is reachable.
+                viewModel.setMarkerMode(MarkerMode.STOP)
+                consoleExpanded = false
+            },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth(),
@@ -442,8 +467,8 @@ private fun StatusRow(
     markerMode: MarkerMode,
     hasStart: Boolean,
     hasEnd: Boolean,
-    simulationStatus: SimulationStatus,
-    fixCount: Long,
+    stopCount: Int,
+    simulation: com.mocklocation.app.model.SimulationState,
     onModeClick: () -> Unit,
 ) {
     Row(
@@ -451,24 +476,37 @@ private fun StatusRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        val modeColor = if (markerMode == MarkerMode.START) Cockpit.Start else Cockpit.End
+        val modeColor = when (markerMode) {
+            MarkerMode.START -> Cockpit.Start
+            MarkerMode.END -> Cockpit.End
+            MarkerMode.STOP -> Cockpit.Warn
+        }
         StatusPill(
-            text = if (markerMode == MarkerMode.START) "TAP-HOLD → START" else "TAP-HOLD → END",
+            text = "HOLD → ${markerMode.label}",
             color = modeColor,
             onClick = onModeClick,
         )
         if (hasStart && hasEnd) {
-            StatusPill(text = "A→B SET", color = Cockpit.InkMuted)
+            StatusPill(
+                text = if (stopCount > 0) "A→B · $stopCount STOP" else "A→B SET",
+                color = Cockpit.InkMuted,
+            )
         }
         Box(Modifier.weight(1f))
-        when (simulationStatus) {
-            SimulationStatus.PLAYING -> StatusPill(
-                text = "LIVE · $fixCount",
+        when {
+            simulation.isDwelling -> StatusPill(
+                text = "STOP ${simulation.stopsServed} · ${simulation.dwellRemainingSeconds}s",
+                color = Cockpit.Warn,
+                live = true,
+            )
+            simulation.status == SimulationStatus.PLAYING -> StatusPill(
+                text = "LIVE · ${simulation.fixCount}",
                 color = Cockpit.Live,
                 live = true,
             )
-            SimulationStatus.PAUSED -> StatusPill(text = "HOLD", color = Cockpit.Warn)
-            SimulationStatus.IDLE -> Unit
+            simulation.status == SimulationStatus.PAUSED ->
+                StatusPill(text = "HOLD", color = Cockpit.Warn)
+            else -> Unit
         }
     }
 }

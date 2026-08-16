@@ -39,6 +39,12 @@ data class SimulationState(
     val pointIndex: Int = 0,
     val elapsedMillis: Long = 0L,
 
+    // ── Intermediate stops ──────────────────────────────────────
+    val stopsTotal: Int = 0,
+    val stopsServed: Int = 0,
+    /** Seconds left standing at the current stop; 0 when moving. */
+    val dwellRemainingSeconds: Long = 0L,
+
     // ── Fix / receiver telemetry ("nerd info") ──────────────────
     val fixCount: Long = 0L,
     val updateIntervalMs: Long = 200L,
@@ -52,6 +58,9 @@ data class SimulationState(
     val injectionError: String? = null,
 ) {
     val isActive: Boolean get() = status != SimulationStatus.IDLE
+
+    /** Standing at an intermediate stop rather than driving. */
+    val isDwelling: Boolean get() = dwellRemainingSeconds > 0L
 
     val progress: Float
         get() = if (totalDistanceMeters > 0.0)

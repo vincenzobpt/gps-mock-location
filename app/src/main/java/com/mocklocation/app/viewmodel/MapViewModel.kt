@@ -4,12 +4,15 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mocklocation.app.MockLocationApp
+import com.mocklocation.app.data.Preferences
 import com.mocklocation.app.location.MockLocationEngine
 import com.mocklocation.app.model.LatLng
+import com.mocklocation.app.model.MapTheme
 import com.mocklocation.app.model.MarkerMode
 import com.mocklocation.app.model.Route
 import com.mocklocation.app.model.SearchSuggestion
 import com.mocklocation.app.model.SimulationConfig
+import com.mocklocation.app.model.Waypoint
 import com.mocklocation.app.network.OsrmRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,6 +36,7 @@ import java.util.concurrent.TimeUnit
 class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     private val engine = MockLocationApp.engineOf(application)
+    private val preferences = Preferences(application)
     private val repository = OsrmRepository()
 
     // ── Simulation (delegated) ──────────────────────────────────
@@ -41,6 +45,9 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     val providerStatus: StateFlow<MockLocationEngine.Status> = engine.providerStatus
 
     val elevationProfile: List<Double>? get() = engine.elevationProfile
+
+    /** Where the stops fall along the route, for the progress rail. */
+    val stopFractions: List<Float> get() = engine.stopFractions
 
     // ── Map / route state ───────────────────────────────────────
     private val _startPoint = MutableStateFlow<LatLng?>(null)
@@ -51,6 +58,9 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _markerMode = MutableStateFlow(MarkerMode.START)
     val markerMode: StateFlow<MarkerMode> = _markerMode.asStateFlow()
+
+    private val _waypoints = MutableStateFlow<List<Waypoint>>(emptyList())
+    val waypoints: StateFlow<List<Waypoint>> = _waypoints.asStateFlow()
 
     private val _route = MutableStateFlow<Route?>(null)
     val route: StateFlow<Route?> = _route.asStateFlow()
@@ -82,8 +92,10 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     private val _followVehicle = MutableStateFlow(true)
     val followVehicle: StateFlow<Boolean> = _followVehicle.asStateFlow()
 
-    private val _nightMap = MutableStateFlow(true)
-    val nightMap: StateFlow<Boolean> = _nightMap.asStateFlow()
+    /** Persisted basemap preference: light, dark, or follow the system. */
+    val mapTheme: StateFlow<MapTheme> = preferences.mapTheme
+
+    fun setMapTheme(theme: MapTheme) = preferences.setMapTheme(theme)
 
     // ── Search ──────────────────────────────────────────────────
     private val _searchQuery = MutableStateFlow("")
@@ -96,6 +108,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     val searchSuggestions: StateFlow<List<SearchSuggestion>> = _searchSuggestions.asStateFlow()
 
     private var searchJob: Job? = null
+    private var routeJob: Job? = null
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -139,19 +152,15 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onMapLongPress(latLng: LatLng) {
         when (_markerMode.value) {
-            MarkerMode.START -> {
-                _startPoint.value = latLng
-                _markerMode.value = MarkerMode.END
-            }
-            MarkerMode.END -> {
-                _endPoint.value = latLng
-                _markerMode.value = MarkerMode.START
-            }
+            MarkerMode.START -> _startPoint.value = latLng
+            MarkerMode.END -> _endPoint.value = latLng
+            MarkerMode.STOP -> _waypoints.value = _waypoints.value + Waypoint(latLng)
         }
+        // Advance the mode so a route can be built with repeated long-presses:
+        // start → end → stop, stop, stop…
+        _markerMode.value = _markerMode.value.next()
         _errorMessage.value = null
-        val start = _startPoint.value ?: return
-        val end = _endPoint.value ?: return
-        fetchRoute(start, end)
+        recalculate()
     }
 
     fun setMarkerMode(mode: MarkerMode) {
@@ -159,18 +168,46 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cycleMarkerMode() {
-        _markerMode.value =
-            if (_markerMode.value == MarkerMode.START) MarkerMode.END else MarkerMode.START
+        _markerMode.value = when (_markerMode.value) {
+            MarkerMode.START -> MarkerMode.END
+            MarkerMode.END -> MarkerMode.STOP
+            MarkerMode.STOP -> MarkerMode.START
+        }
+    }
+
+    // ── Intermediate stops ─────────────────────────────────────
+
+    fun removeWaypoint(index: Int) {
+        val current = _waypoints.value
+        if (index !in current.indices) return
+        _waypoints.value = current.filterIndexed { i, _ -> i != index }
+        recalculate()
+    }
+
+    /** Steps the dwell time through the presets; no re-routing needed. */
+    fun cycleWaypointDwell(index: Int) {
+        val current = _waypoints.value
+        if (index !in current.indices) return
+        _waypoints.value = current.mapIndexed { i, wp ->
+            if (i == index) wp.cycleDwell() else wp
+        }
+        // Dwell does not change the geometry, but the engine holds the resolved
+        // stop list, so it has to be handed the new durations.
+        _route.value?.let { engine.setRoute(it, _waypoints.value) }
+    }
+
+    fun clearWaypoints() {
+        if (_waypoints.value.isEmpty()) return
+        _waypoints.value = emptyList()
+        recalculate()
     }
 
     fun calculateRoute() {
-        val start = _startPoint.value
-        val end = _endPoint.value
-        if (start == null || end == null) {
+        if (_startPoint.value == null || _endPoint.value == null) {
             _errorMessage.value = "Long-press the map to drop both points"
             return
         }
-        fetchRoute(start, end)
+        recalculate()
     }
 
     fun swapEndpoints() {
@@ -179,7 +216,10 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         if (start == null || end == null) return
         _startPoint.value = end
         _endPoint.value = start
-        fetchRoute(end, start)
+        // Stops keep their positions but are met in the opposite order; the
+        // engine re-sorts them by arc length, so just reverse for the UI list.
+        _waypoints.value = _waypoints.value.reversed()
+        recalculate()
     }
 
     fun clearAll() {
@@ -187,6 +227,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         engine.setRoute(null)
         _startPoint.value = null
         _endPoint.value = null
+        _waypoints.value = emptyList()
         _route.value = null
         _errorMessage.value = null
         _markerMode.value = MarkerMode.START
@@ -200,8 +241,11 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         _followVehicle.value = enabled
     }
 
-    fun toggleNightMap() {
-        _nightMap.value = !_nightMap.value
+    /** Rail shortcut: flips between light and dark, leaving SYSTEM behind. */
+    fun toggleMapTheme(systemInDarkMode: Boolean) {
+        setMapTheme(
+            if (mapTheme.value.isDark(systemInDarkMode)) MapTheme.LIGHT else MapTheme.DARK
+        )
     }
 
     /** Frames the whole route; used by the "fit" control and after routing. */
@@ -223,14 +267,28 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
 
     // ═══ Routing ═══════════════════════════════════════════════
 
-    private fun fetchRoute(start: LatLng, end: LatLng) {
-        viewModelScope.launch {
+    /**
+     * Re-routes through start → stops → end. A no-op until both endpoints
+     * exist, so it is safe to call after every edit.
+     */
+    private fun recalculate() {
+        val start = _startPoint.value ?: return
+        val end = _endPoint.value ?: return
+        val stops = _waypoints.value
+        val points = buildList {
+            add(start)
+            addAll(stops.map { it.latLng })
+            add(end)
+        }
+
+        routeJob?.cancel()
+        routeJob = viewModelScope.launch {
             _isCalculatingRoute.value = true
             _errorMessage.value = null
-            repository.getRoute(start, end).fold(
+            repository.getRoute(points).fold(
                 onSuccess = { route ->
                     _route.value = route
-                    engine.setRoute(route)
+                    engine.setRoute(route, stops)
                     requestFitRoute()
                 },
                 onFailure = { e ->

@@ -52,6 +52,7 @@ fun MapCanvas(
     simulation: SimulationState,
     startPoint: LatLng?,
     endPoint: LatLng?,
+    waypoints: List<LatLng>,
     nightMode: Boolean,
     onLongPress: (LatLng) -> Unit,
     onUserPan: () -> Unit,
@@ -63,8 +64,10 @@ fun MapCanvas(
     val routeOverlay = remember { RouteOverlay() }
     val endpointOverlay = remember {
         EndpointOverlay(
-            startPin = endpointBitmap(context, Cockpit.Start, isStart = true),
-            endPin = endpointBitmap(context, Cockpit.End, isStart = false),
+            startPin = endpointBitmap(context, Cockpit.Start, PinKind.START),
+            endPin = endpointBitmap(context, Cockpit.End, PinKind.END),
+            stopPin = endpointBitmap(context, Cockpit.Warn, PinKind.STOP),
+            density = context.resources.displayMetrics.density,
         )
     }
 
@@ -117,8 +120,9 @@ fun MapCanvas(
             val density = map.resources.displayMetrics.density
             routeOverlay.density = density
             vehicleOverlay.density = density
+            routeOverlay.night = nightMode
             routeOverlay.update(route?.points, simulation.pointIndex, simulation.isActive)
-            endpointOverlay.update(startPoint, endPoint)
+            endpointOverlay.update(startPoint, endPoint, waypoints)
             vehicleOverlay.update(simulation)
 
             map.invalidate()
@@ -205,6 +209,9 @@ private class RouteOverlay : Overlay() {
     /** Screen density, so stroke widths are dp-consistent across devices. */
     var density: Float = 3f
 
+    /** Drives the palette — the same colours are invisible on the other basemap. */
+    var night: Boolean = true
+
     fun update(routePoints: List<LatLng>?, index: Int, isActive: Boolean) {
         // Re-projecting thousands of vertices at the fix rate would burn the
         // main thread; the route only changes when a new one is calculated.
@@ -219,14 +226,28 @@ private class RouteOverlay : Overlay() {
     override fun draw(canvas: AndroidCanvas, projection: Projection) {
         if (points.size < 2) return
 
-        glowPaint.color = Cockpit.Live.copy(alpha = if (active) 0.20f else 0.10f).toArgb()
-        glowPaint.strokeWidth = 7f * density
-        remainingPaint.color = Cockpit.InkMuted.copy(alpha = 0.55f).toArgb()
-        remainingPaint.strokeWidth = 1.8f * density
+        // The first pass is a casing, not decoration. On the dark basemap it is
+        // an accent glow; on the light one it has to be a dark halo, because a
+        // pale line over pale cartography reads as no line at all — which is
+        // exactly how the route "disappeared" in light mode.
+        glowPaint.color = if (night) {
+            Cockpit.Live.copy(alpha = if (active) 0.20f else 0.10f).toArgb()
+        } else {
+            Color(0xFF0F172A).copy(alpha = 0.34f).toArgb()
+        }
+        glowPaint.strokeWidth = if (night) 7f * density else 5.4f * density
+
+        remainingPaint.color = if (night) {
+            Cockpit.InkMuted.copy(alpha = 0.55f).toArgb()
+        } else {
+            Color(0xFF1E293B).copy(alpha = 0.85f).toArgb()
+        }
+        remainingPaint.strokeWidth = if (night) 1.8f * density else 2.2f * density
         remainingPaint.pathEffect = DashPathEffect(
             floatArrayOf(5f * density, 4f * density), 0f
         )
-        travelledPaint.color = Cockpit.Live.toArgb()
+
+        travelledPaint.color = if (night) Cockpit.Live.toArgb() else Color(0xFF0369A1).toArgb()
         travelledPaint.strokeWidth = 2.8f * density
 
         canvas.drawPath(buildPath(projection, 0, points.lastIndex), glowPaint)
@@ -371,19 +392,40 @@ private class VehicleOverlay : Overlay() {
 private class EndpointOverlay(
     private val startPin: Bitmap,
     private val endPin: Bitmap,
+    private val stopPin: Bitmap,
+    private val density: Float,
 ) : Overlay() {
 
     private var start: LatLng? = null
     private var end: LatLng? = null
+    private var stops: List<LatLng> = emptyList()
+
     private val scratch = android.graphics.Point()
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Cockpit.Void.toArgb()
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+    }
 
-    fun update(newStart: LatLng?, newEnd: LatLng?) {
+    fun update(newStart: LatLng?, newEnd: LatLng?, newStops: List<LatLng>) {
         start = newStart
         end = newEnd
+        stops = newStops
     }
 
     override fun draw(canvas: AndroidCanvas, projection: Projection) {
+        // Stops sit below the endpoints so an overlapping start/end stays readable.
+        stops.forEachIndexed { index, at ->
+            blit(canvas, projection, at, stopPin)
+            // The ordinal is drawn live rather than baked into a bitmap per
+            // stop — the list is short and it survives reordering for free.
+            labelPaint.textSize = stopPin.width * 0.34f
+            val cx = scratch.x.toFloat()
+            val headCy = scratch.y - stopPin.height + stopPin.width * 0.36f + 2f * density
+            val yOffset = (labelPaint.descent() + labelPaint.ascent()) / 2f
+            canvas.drawText("${index + 1}", cx, headCy - yOffset, labelPaint)
+        }
         start?.let { blit(canvas, projection, it, startPin) }
         end?.let { blit(canvas, projection, it, endPin) }
     }
@@ -400,8 +442,10 @@ private class EndpointOverlay(
     }
 }
 
+private enum class PinKind { START, END, STOP }
+
 /** Teardrop pin with a soft halo, rasterised once and reused. */
-private fun endpointBitmap(context: Context, color: Color, isStart: Boolean): Bitmap {
+private fun endpointBitmap(context: Context, color: Color, kind: PinKind): Bitmap {
     val density = context.resources.displayMetrics.density
     val w = (34 * density).toInt()
     val h = (44 * density).toInt()
@@ -436,17 +480,30 @@ private fun endpointBitmap(context: Context, color: Color, isStart: Boolean): Bi
 
     // Head.
     canvas.drawCircle(cx, cy, headR, paint)
-    paint.color = Cockpit.Void.toArgb()
-    canvas.drawCircle(cx, cy, headR * 0.62f, paint)
 
-    // Glyph: a filled dot for START, a ring for END.
-    paint.color = color.toArgb()
-    if (isStart) {
-        canvas.drawCircle(cx, cy, headR * 0.30f, paint)
-    } else {
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = headR * 0.20f
-        canvas.drawCircle(cx, cy, headR * 0.30f, paint)
+    when (kind) {
+        // START keeps a dark core with a filled dot, END a dark core with a
+        // ring; STOP stays solid so the ordinal drawn on top of it reads.
+        PinKind.START -> {
+            paint.color = Cockpit.Void.toArgb()
+            canvas.drawCircle(cx, cy, headR * 0.62f, paint)
+            paint.color = color.toArgb()
+            canvas.drawCircle(cx, cy, headR * 0.30f, paint)
+        }
+        PinKind.END -> {
+            paint.color = Cockpit.Void.toArgb()
+            canvas.drawCircle(cx, cy, headR * 0.62f, paint)
+            paint.color = color.toArgb()
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = headR * 0.20f
+            canvas.drawCircle(cx, cy, headR * 0.30f, paint)
+        }
+        PinKind.STOP -> {
+            paint.color = Cockpit.Void.toArgb()
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = headR * 0.14f
+            canvas.drawCircle(cx, cy, headR * 0.80f, paint)
+        }
     }
 
     return bitmap

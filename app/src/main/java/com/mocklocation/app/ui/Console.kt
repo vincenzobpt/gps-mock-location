@@ -48,15 +48,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mocklocation.app.model.AltitudeMode
 import com.mocklocation.app.model.FixRate
+import com.mocklocation.app.model.MapTheme
 import com.mocklocation.app.model.Route
 import com.mocklocation.app.model.SimulationConfig
 import com.mocklocation.app.model.SimulationState
 import com.mocklocation.app.model.SimulationStatus
+import com.mocklocation.app.model.Waypoint
 import com.mocklocation.app.simulation.SimulationEngine
 import com.mocklocation.app.ui.theme.Cockpit
 import kotlin.math.roundToInt
 
-enum class ConsoleTab { TELEMETRY, TUNING }
+enum class ConsoleTab { ROUTE, TELEMETRY, TUNING }
 
 /**
  * The bottom instrument console.
@@ -71,6 +73,9 @@ fun Console(
     config: SimulationConfig,
     route: Route?,
     elevationProfile: List<Double>?,
+    waypoints: List<Waypoint>,
+    stopFractions: List<Float>,
+    mapTheme: MapTheme,
     expanded: Boolean,
     tab: ConsoleTab,
     isCalculating: Boolean,
@@ -84,6 +89,11 @@ fun Console(
     onClear: () -> Unit,
     onSwap: () -> Unit,
     onConfigChange: ((SimulationConfig) -> SimulationConfig) -> Unit,
+    onRemoveWaypoint: (Int) -> Unit,
+    onCycleDwell: (Int) -> Unit,
+    onClearWaypoints: () -> Unit,
+    onMapThemeChange: (MapTheme) -> Unit,
+    onAddStopHint: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     GlassSurface(
@@ -116,6 +126,7 @@ fun Console(
             RouteStrip(
                 state = state,
                 route = route,
+                stopFractions = stopFractions,
                 onSeek = onSeek,
                 modifier = Modifier.padding(horizontal = 18.dp)
             )
@@ -157,8 +168,22 @@ fun Console(
                                 .padding(horizontal = 18.dp)
                         ) {
                             when (tab) {
+                                ConsoleTab.ROUTE -> RoutePane(
+                                    route = route,
+                                    waypoints = waypoints,
+                                    state = state,
+                                    onRemoveWaypoint = onRemoveWaypoint,
+                                    onCycleDwell = onCycleDwell,
+                                    onClearWaypoints = onClearWaypoints,
+                                    onAddStopHint = onAddStopHint,
+                                )
                                 ConsoleTab.TELEMETRY -> TelemetryPane(state, config, elevationProfile)
-                                ConsoleTab.TUNING -> TuningPane(config, onConfigChange)
+                                ConsoleTab.TUNING -> TuningPane(
+                                    config = config,
+                                    mapTheme = mapTheme,
+                                    onChange = onConfigChange,
+                                    onMapThemeChange = onMapThemeChange,
+                                )
                             }
                             Spacer(Modifier.height(8.dp))
                         }
@@ -182,6 +207,7 @@ fun Console(
 private fun RouteStrip(
     state: SimulationState,
     route: Route?,
+    stopFractions: List<Float>,
     onSeek: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -213,6 +239,7 @@ private fun RouteStrip(
         }
         ProgressRail(
             progress = state.progress,
+            stopFractions = stopFractions,
             enabled = route != null,
             onSeek = onSeek,
             modifier = Modifier.fillMaxWidth()
@@ -345,6 +372,202 @@ private fun TabStrip(
                         letterSpacing = 1.1.sp,
                     )
                 }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ROUTE PANE  —  intermediate stops
+// ═══════════════════════════════════════════════════════════════
+
+@Composable
+private fun RoutePane(
+    route: Route?,
+    waypoints: List<Waypoint>,
+    state: SimulationState,
+    onRemoveWaypoint: (Int) -> Unit,
+    onCycleDwell: (Int) -> Unit,
+    onClearWaypoints: () -> Unit,
+    onAddStopHint: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+
+        SectionHeader(
+            "Route",
+            trailing = route?.let { "${it.totalDistanceFormatted} · ${it.durationFormatted}" }
+        )
+        Spacer(Modifier.height(10.dp))
+
+        SectionHeader("Stops", trailing = if (waypoints.isEmpty()) null else "${waypoints.size}")
+        Spacer(Modifier.height(8.dp))
+
+        if (waypoints.isEmpty()) {
+            // An empty list that only says "empty" teaches nothing; this one
+            // arms the placement mode so the gesture is one tap away.
+            Surface(
+                onClick = onAddStopHint,
+                shape = RoundedCornerShape(14.dp),
+                color = Color.White.copy(alpha = 0.04f),
+                border = BorderStroke(1.dp, Cockpit.Hairline),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("＋", color = Cockpit.Warn, fontSize = 16.sp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "Add an intermediate stop",
+                            color = Cockpit.Ink,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = "Tap here, then long-press the map. The route is re-calculated through every stop in order.",
+                            color = Cockpit.InkFaint,
+                            fontSize = 10.5.sp,
+                            lineHeight = 14.sp,
+                        )
+                    }
+                }
+            }
+        } else {
+            waypoints.forEachIndexed { index, waypoint ->
+                StopRow(
+                    index = index,
+                    waypoint = waypoint,
+                    served = state.isActive && state.stopsServed > index,
+                    onCycleDwell = { onCycleDwell(index) },
+                    onRemove = { onRemoveWaypoint(index) },
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Surface(
+                    onClick = onAddStopHint,
+                    shape = RoundedCornerShape(11.dp),
+                    color = Cockpit.Warn.copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, Cockpit.Warn.copy(alpha = 0.35f)),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Box(Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            "＋ ADD STOP",
+                            color = Cockpit.Warn,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+                Surface(
+                    onClick = onClearWaypoints,
+                    shape = RoundedCornerShape(11.dp),
+                    color = Color.White.copy(alpha = 0.04f),
+                    border = BorderStroke(1.dp, Cockpit.Hairline),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Box(Modifier.padding(vertical = 9.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            "CLEAR ALL",
+                            color = Cockpit.InkMuted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StopRow(
+    index: Int,
+    waypoint: Waypoint,
+    served: Boolean,
+    onCycleDwell: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val accent = if (served) Cockpit.Start else Cockpit.Warn
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Color.White.copy(alpha = 0.04f),
+        border = BorderStroke(1.dp, Cockpit.Hairline),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(22.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(accent.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (served) "✓" else "${index + 1}",
+                    color = accent,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = formatDecimal(waypoint.latLng.latitude, 5) + ", " +
+                        formatDecimal(waypoint.latLng.longitude, 5),
+                    color = Cockpit.Ink,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                )
+                Text(
+                    text = if (waypoint.stayDurationSeconds <= 0) "drive through"
+                    else "wait ${Waypoint.formatDwell(waypoint.stayDurationSeconds)}",
+                    color = Cockpit.InkFaint,
+                    fontSize = 10.sp,
+                )
+            }
+
+            Spacer(Modifier.width(8.dp))
+
+            Surface(
+                onClick = onCycleDwell,
+                shape = RoundedCornerShape(9.dp),
+                color = accent.copy(alpha = 0.12f),
+            ) {
+                Text(
+                    text = Waypoint.formatDwell(waypoint.stayDurationSeconds),
+                    color = accent,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                )
+            }
+
+            Spacer(Modifier.width(6.dp))
+
+            Surface(
+                onClick = onRemove,
+                shape = RoundedCornerShape(9.dp),
+                color = Color.White.copy(alpha = 0.05f),
+            ) {
+                Text(
+                    text = "✕",
+                    color = Cockpit.InkMuted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                )
             }
         }
     }
@@ -588,9 +811,30 @@ private fun ProviderRow(state: SimulationState) {
 @Composable
 private fun TuningPane(
     config: SimulationConfig,
+    mapTheme: MapTheme,
     onChange: ((SimulationConfig) -> SimulationConfig) -> Unit,
+    onMapThemeChange: (MapTheme) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
+
+        PillGroup(
+            label = "Basemap",
+            options = MapTheme.entries.map { it to it.label },
+            selected = mapTheme,
+            onSelect = onMapThemeChange,
+        )
+        Text(
+            text = when (mapTheme) {
+                MapTheme.SYSTEM -> "Follows the device light/dark setting"
+                MapTheme.DARK -> "Always dark — CARTO Dark Matter"
+                MapTheme.LIGHT -> "Always light — OpenStreetMap standard"
+            },
+            color = Cockpit.InkFaint,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+
+        Spacer(Modifier.height(16.dp))
 
         RangeHeader(
             icon = "⚡",

@@ -304,6 +304,7 @@ fun ElevationProfile(
 fun ProgressRail(
     progress: Float,
     modifier: Modifier = Modifier,
+    stopFractions: List<Float> = emptyList(),
     enabled: Boolean = true,
     onSeek: (Float) -> Unit = {},
 ) {
@@ -355,6 +356,18 @@ fun ProgressRail(
                     end = Offset(x, cy),
                     strokeWidth = track,
                     cap = StrokeCap.Round
+                )
+            }
+
+            // Intermediate stops, so the rail shows *where* the run will pause.
+            stopFractions.forEach { fraction ->
+                val sx = r + (size.width - r * 2) * fraction.coerceIn(0f, 1f)
+                val passed = fraction <= animated
+                drawCircle(Cockpit.Void, r * 0.9f, Offset(sx, cy))
+                drawCircle(
+                    color = if (passed) Cockpit.Start else Cockpit.Warn,
+                    radius = r * 0.62f,
+                    center = Offset(sx, cy)
                 )
             }
 

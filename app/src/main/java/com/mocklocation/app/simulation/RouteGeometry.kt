@@ -99,6 +99,49 @@ class RouteGeometry(route: Route) {
         return elevations[i] * (1.0 - t) + elevations[i + 1] * t
     }
 
+    /**
+     * Arc length of the point on the route closest to [target].
+     *
+     * Used to place intermediate stops: the coordinate the user long-pressed is
+     * snapped onto the road geometry OSRM actually returned, so a stop triggers
+     * where the route passes it rather than where the finger landed.
+     */
+    fun arcLengthNearest(target: LatLng): Double {
+        if (points.size < 2) return 0.0
+        // Local equirectangular projection — over a single segment the error is
+        // far below the metre, and it keeps the projection a plain dot product.
+        val latScale = 111_320.0
+        val lonScale = latScale * kotlin.math.cos(Math.toRadians(target.latitude))
+            .coerceAtLeast(0.05)
+
+        var bestDistanceSq = Double.MAX_VALUE
+        var bestArc = 0.0
+
+        for (i in 0 until points.lastIndex) {
+            val ax = points[i].longitude * lonScale
+            val ay = points[i].latitude * latScale
+            val bx = points[i + 1].longitude * lonScale
+            val by = points[i + 1].latitude * latScale
+            val px = target.longitude * lonScale
+            val py = target.latitude * latScale
+
+            val dx = bx - ax
+            val dy = by - ay
+            val lenSq = dx * dx + dy * dy
+            val t = if (lenSq > 0.0) (((px - ax) * dx + (py - ay) * dy) / lenSq).coerceIn(0.0, 1.0) else 0.0
+
+            val cx = ax + dx * t
+            val cy = ay + dy * t
+            val distSq = (px - cx) * (px - cx) + (py - cy) * (py - cy)
+
+            if (distSq < bestDistanceSq) {
+                bestDistanceSq = distSq
+                bestArc = cumulative[i] + (cumulative[i + 1] - cumulative[i]) * t
+            }
+        }
+        return bestArc.coerceIn(0.0, totalMeters)
+    }
+
     /** Lowest curvature ceiling within [lookAheadMeters] ahead of [meters]. */
     fun speedLimitAhead(meters: Double, lookAheadMeters: Double): Float {
         if (points.size < 2) return Float.MAX_VALUE
