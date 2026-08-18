@@ -144,8 +144,8 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 ```bash
 # Clone the repository
-git clone https://github.com/vincenzobpt/MockLocation.git
-cd MockLocation
+git clone https://github.com/vincenzobpt/gps-mock-location.git
+cd gps-mock-location
 
 # Build the debug APK
 JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
@@ -183,7 +183,7 @@ app/build/outputs/apk/debug/app-debug.apk
 ## Project structure
 
 ```
-MockLocation/
+gps-mock-location/
 ├── app/
 │   ├── build.gradle.kts
 │   └── src/
@@ -302,7 +302,7 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE).
 you agree to:**
 
 - Retain the original copyright notice
-- Retain the original repository URL (`https://github.com/vincenzobpt/MockLocation`)
+- Retain the original repository URL (`https://github.com/vincenzobpt/gps-mock-location`)
   in a visible place (e.g. `LICENSE`, `README`, or the app's About screen)
 - Clearly indicate what changes were made if you distribute a modified version
 
