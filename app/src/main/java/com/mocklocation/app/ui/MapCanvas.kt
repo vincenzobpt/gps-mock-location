@@ -178,7 +178,14 @@ private fun applyTileStyle(map: MapView, night: Boolean) {
 /**
  * Draws the route in three passes: a wide low-alpha glow, the remaining path as
  * a dashed neutral, and the traveled path as the live accent. Splitting on the
- * vertex index the engine already reports keeps it exact and allocation-free.
+ * vertex index the engine already reports keeps the split exact.
+ *
+ * Every vertex is projected once per frame into [projected], and the three
+ * passes are filled from that. Building each pass straight from the Projection
+ * walked the polyline about twice a frame, and toPixels — which does the actual
+ * Mercator work — was the expensive half. The Paths and the dash effect are
+ * kept and reused for the same reason: this runs on the main thread at the fix
+ * rate, over routes of a few thousand vertices.
  */
 private class RouteOverlay : Overlay() {
 
@@ -205,6 +212,17 @@ private class RouteOverlay : Overlay() {
     }
 
     private val scratch = android.graphics.Point()
+
+    /** Screen-space x,y pairs for every vertex, refilled once per frame. */
+    private var projected = FloatArray(0)
+
+    // Reused every frame: rewind() keeps the backing allocation, unlike Path().
+    private val glowPath = Path()
+    private val remainingPath = Path()
+    private val travelledPath = Path()
+
+    private var dashEffect: DashPathEffect? = null
+    private var dashDensity = 0f
 
     /** Screen density, so stroke widths are dp-consistent across devices. */
     var density: Float = 3f
@@ -243,36 +261,50 @@ private class RouteOverlay : Overlay() {
             Color(0xFF1E293B).copy(alpha = 0.85f).toArgb()
         }
         remainingPaint.strokeWidth = if (night) 1.8f * density else 2.2f * density
-        remainingPaint.pathEffect = DashPathEffect(
-            floatArrayOf(5f * density, 4f * density), 0f
-        )
+        remainingPaint.pathEffect = dashEffect()
 
         travelledPaint.color = if (night) Cockpit.Live.toArgb() else Color(0xFF0369A1).toArgb()
         travelledPaint.strokeWidth = 2.8f * density
 
-        canvas.drawPath(buildPath(projection, 0, points.lastIndex), glowPaint)
+        projectVertices(projection)
+
+        canvas.drawPath(fill(glowPath, 0, points.lastIndex), glowPaint)
 
         if (travelledIndex < points.lastIndex) {
-            canvas.drawPath(buildPath(projection, travelledIndex, points.lastIndex), remainingPaint)
+            canvas.drawPath(fill(remainingPath, travelledIndex, points.lastIndex), remainingPaint)
         }
         if (travelledIndex > 0) {
-            canvas.drawPath(buildPath(projection, 0, travelledIndex), travelledPaint)
+            canvas.drawPath(fill(travelledPath, 0, travelledIndex), travelledPaint)
         }
     }
 
-    private fun buildPath(projection: Projection, from: Int, to: Int): Path {
-        val path = Path()
-        var started = false
-        for (i in from..to) {
+    /** Projects every vertex once, into a buffer that survives across frames. */
+    private fun projectVertices(projection: Projection) {
+        if (projected.size < points.size * 2) projected = FloatArray(points.size * 2)
+        for (i in points.indices) {
             projection.toPixels(points[i], scratch)
-            if (!started) {
-                path.moveTo(scratch.x.toFloat(), scratch.y.toFloat())
-                started = true
-            } else {
-                path.lineTo(scratch.x.toFloat(), scratch.y.toFloat())
-            }
+            projected[i * 2] = scratch.x.toFloat()
+            projected[i * 2 + 1] = scratch.y.toFloat()
+        }
+    }
+
+    /** Rewinds [path] and refills it from the cached projection. */
+    private fun fill(path: Path, from: Int, to: Int): Path {
+        path.rewind()
+        path.moveTo(projected[from * 2], projected[from * 2 + 1])
+        for (i in from + 1..to) {
+            path.lineTo(projected[i * 2], projected[i * 2 + 1])
         }
         return path
+    }
+
+    /** The dash pattern only depends on density, so it is built once per device. */
+    private fun dashEffect(): DashPathEffect {
+        dashEffect?.takeIf { dashDensity == density }?.let { return it }
+        return DashPathEffect(floatArrayOf(5f * density, 4f * density), 0f).also {
+            dashEffect = it
+            dashDensity = density
+        }
     }
 }
 

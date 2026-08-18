@@ -12,6 +12,7 @@ import com.mocklocation.app.model.MarkerMode
 import com.mocklocation.app.model.Route
 import com.mocklocation.app.model.SearchSuggestion
 import com.mocklocation.app.model.SimulationConfig
+import com.mocklocation.app.model.SimulationStatus
 import com.mocklocation.app.model.Waypoint
 import com.mocklocation.app.network.OsrmRepository
 import kotlinx.coroutines.Dispatchers
@@ -142,9 +143,15 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     fun updateConfig(transform: (SimulationConfig) -> SimulationConfig) =
         engine.updateConfig(transform)
 
-    /** Re-arms the providers after the user fixes permissions in Settings. */
+    /**
+     * Re-arms the providers after the user fixes permissions in Settings.
+     *
+     * PLAYING only. isActive also covers PAUSED, and play() resumes — so
+     * granting a permission while deliberately paused restarted playback the
+     * user had not asked for.
+     */
     fun refreshProviderStatus() {
-        if (!simulation.value.isActive) return
+        if (simulation.value.status != SimulationStatus.PLAYING) return
         engine.play()
     }
 
