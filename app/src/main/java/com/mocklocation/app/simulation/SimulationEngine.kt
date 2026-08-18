@@ -83,6 +83,31 @@ class SimulationEngine(
         val dwellSeconds: Long,
     )
 
+    // ── Thread confinement ──────────────────────────────────────
+
+    /**
+     * Guards every integrator field above and every write to [_state].
+     *
+     * The tick runs on Dispatchers.Default while transport commands arrive on
+     * Main. Without this, `_state.value = _state.value.copy(...)` was a
+     * read-modify-write across threads: a stop() landing between the read and
+     * the write was silently overwritten, leaving the UI on PLAYING with no
+     * loop behind it. It also made seekTo() fight the loop for distanceMeters
+     * and nextStopIndex mid-drag.
+     *
+     * Held only for non-suspending work. The binder round-trip that injects a
+     * fix deliberately happens outside it.
+     */
+    private val stateLock = Any()
+
+    /**
+     * Bumped by every transport transition. A tick captures it when the loop
+     * launches and abandons its write if it no longer matches, so a run that
+     * has been paused, stopped or replaced can never publish after the command
+     * that ended it — cancellation alone cannot do this, being cooperative.
+     */
+    private var runEpoch = 0L
+
     // ── Configuration ───────────────────────────────────────────
 
     fun updateConfig(transform: (SimulationConfig) -> SimulationConfig) {
@@ -103,15 +128,15 @@ class SimulationEngine(
     /** Installs a new route and its intermediate stops. Resets progress. */
     fun setRoute(route: Route?, waypoints: List<Waypoint> = emptyList()) {
         stop()
-        val geo = route?.let(::RouteGeometry)?.takeIf { it.isUsable }
-        geometry = geo
-
-        stops = if (geo == null) emptyList() else buildStops(geo, waypoints)
-
-        _state.value = SimulationState(
-            totalDistanceMeters = geo?.totalMeters ?: 0.0,
-            updateIntervalMs = _config.value.intervalMs,
-        )
+        synchronized(stateLock) {
+            val geo = route?.let(::RouteGeometry)?.takeIf { it.isUsable }
+            geometry = geo
+            stops = if (geo == null) emptyList() else buildStops(geo, waypoints)
+            _state.value = SimulationState(
+                totalDistanceMeters = geo?.totalMeters ?: 0.0,
+                updateIntervalMs = _config.value.intervalMs,
+            )
+        }
     }
 
     /**
@@ -142,13 +167,15 @@ class SimulationEngine(
      */
     fun updateStopDwells(waypoints: List<Waypoint>) {
         val geo = geometry ?: return
-        stops = buildStops(geo, waypoints)
-        // Whatever lies behind us stays served, whatever its new duration.
-        nextStopIndex = stops.count { it.distanceMeters <= distanceMeters }
-        _state.value = _state.value.copy(
-            stopsTotal = stops.size,
-            servedWaypoints = servedWaypoints(),
-        )
+        synchronized(stateLock) {
+            stops = buildStops(geo, waypoints)
+            // Whatever lies behind us stays served, whatever its new duration.
+            nextStopIndex = stops.count { it.distanceMeters <= distanceMeters }
+            _state.value = _state.value.copy(
+                stopsTotal = stops.size,
+                servedWaypoints = servedWaypoints(),
+            )
+        }
     }
 
     /** Arc-length positions of the stops, as fractions of the route. */
@@ -179,25 +206,32 @@ class SimulationEngine(
         _providerStatus.value = providerStatus
         if (providerStatus !is MockLocationEngine.Status.Ready) return providerStatus
 
-        // Finished run → rewind instead of dead-ending on the last fix.
-        if (distanceMeters >= geo.totalMeters - 0.5) reset()
-
         job?.cancel()
-        _state.value = _state.value.copy(
-            status = SimulationStatus.PLAYING,
-            totalDistanceMeters = geo.totalMeters,
-            activeProviders = providerStatus.providers,
-            injectionError = null,
-        )
+        val epoch = synchronized(stateLock) {
+            // Finished run → rewind instead of dead-ending on the last fix.
+            if (distanceMeters >= geo.totalMeters - 0.5) reset()
+            _state.value = _state.value.copy(
+                status = SimulationStatus.PLAYING,
+                totalDistanceMeters = geo.totalMeters,
+                activeProviders = providerStatus.providers,
+                injectionError = null,
+            )
+            ++runEpoch
+        }
+        // Outside the lock: this reaches into the Application to start the
+        // foreground service, which is not work to hold a monitor across.
         onRunningChanged?.invoke(true)
-        job = scope.launch { runLoop(geo) }
+        job = scope.launch { runLoop(geo, epoch) }
         return providerStatus
     }
 
     fun pause() {
         job?.cancel()
         job = null
-        _state.value = _state.value.copy(status = SimulationStatus.PAUSED, speedKmh = 0f)
+        synchronized(stateLock) {
+            runEpoch++
+            _state.value = _state.value.copy(status = SimulationStatus.PAUSED, speedKmh = 0f)
+        }
         onRunningChanged?.invoke(false)
     }
 
@@ -206,11 +240,14 @@ class SimulationEngine(
         job = null
         mockLocation.stop()
         _providerStatus.value = MockLocationEngine.Status.Idle
-        reset()
-        _state.value = SimulationState(
-            totalDistanceMeters = geometry?.totalMeters ?: 0.0,
-            updateIntervalMs = _config.value.intervalMs,
-        )
+        synchronized(stateLock) {
+            runEpoch++
+            reset()
+            _state.value = SimulationState(
+                totalDistanceMeters = geometry?.totalMeters ?: 0.0,
+                updateIntervalMs = _config.value.intervalMs,
+            )
+        }
         onRunningChanged?.invoke(false)
     }
 
@@ -222,15 +259,25 @@ class SimulationEngine(
         else -> play()
     }
 
-    /** Jump to a fraction of the route without changing the transport state. */
+    /**
+     * Jump to a fraction of the route without changing the transport state.
+     *
+     * The rail reports a seek on every pointer move, so this runs at drag rate
+     * on Main against fields the tick is advancing on another thread. Taking
+     * the lock is what stops the tick from overwriting the seek — and what
+     * keeps nextStopIndex consistent with the loop's own increment, which
+     * otherwise served a stop twice or skipped one.
+     */
     fun seekTo(fraction: Float) {
         val geo = geometry ?: return
-        distanceMeters = (geo.totalMeters * fraction.coerceIn(0f, 1f))
-        speedMs = 0.0
-        dwellRemainingMs = 0L
-        // Stops behind the new position are already served.
-        nextStopIndex = stops.count { it.distanceMeters <= distanceMeters }
-        publish(geo, accelerationMs2 = 0f)
+        synchronized(stateLock) {
+            distanceMeters = geo.totalMeters * fraction.coerceIn(0f, 1f)
+            speedMs = 0.0
+            dwellRemainingMs = 0L
+            // Stops behind the new position are already served.
+            nextStopIndex = stops.count { it.distanceMeters <= distanceMeters }
+            _state.value = buildState(geo, _config.value, accelerationMs2 = 0f)
+        }
     }
 
     private fun reset() {
@@ -249,53 +296,89 @@ class SimulationEngine(
 
     // ── The loop ────────────────────────────────────────────────
 
-    private suspend fun runLoop(geo: RouteGeometry) {
-        while (coroutineContext.isActive && _state.value.status == SimulationStatus.PLAYING) {
+    private suspend fun runLoop(geo: RouteGeometry, epoch: Long) {
+        while (coroutineContext.isActive) {
             val cfg = _config.value
             val dtMs = cfg.intervalMs
-            val dt = dtMs / 1000.0
 
-            val previousSpeed = speedMs
-
-            if (dwellRemainingMs > 0L) {
-                // Standing at a stop. Fixes keep flowing — a receiver that goes
-                // silent while parked is exactly what a real one does not do.
-                dwellRemainingMs -= dtMs
-                speedMs = 0.0
-                elapsedMs += dtMs
-                publish(geo, accelerationMs2 = 0f)
-                inject()
-                delay(dtMs)
-                continue
+            // Advance and snapshot together, so no transport command can land
+            // halfway through a tick.
+            val next = synchronized(stateLock) {
+                if (epoch != runEpoch) return
+                val accel = advance(geo, cfg, dtMs)
+                buildState(geo, cfg, accel)
             }
 
-            step(geo, cfg, dt, dtMs)
-            val accel = ((speedMs - previousSpeed) / dt).toFloat()
+            // Outside the lock on purpose: this is up to three binder calls
+            // into system_server and must not block a UI thread tapping stop.
+            val error = mockLocation.push(next.toFix())
 
-            // Reached the next stop?
-            stops.getOrNull(nextStopIndex)?.let { stop ->
-                if (distanceMeters >= stop.distanceMeters) {
-                    distanceMeters = stop.distanceMeters
-                    speedMs = 0.0
-                    dwellRemainingMs = stop.dwellSeconds * 1000L
-                    nextStopIndex++
-                }
+            if (error != null && mockLocation.status !is MockLocationEngine.Status.Ready) {
+                // The registration is gone, not merely a dropped fix. Continuing
+                // would report a live run that reaches no consumer at all.
+                _providerStatus.value = mockLocation.status
+                pause()
+                return
             }
 
-            publish(geo, accel)
-            inject()
-
-            if (distanceMeters >= geo.totalMeters - 0.01) {
-                if (cfg.loopRoute) {
-                    distanceMeters = 0.0
-                    nextStopIndex = 0
-                } else {
-                    finish(geo)
-                    return
+            val arrived = synchronized(stateLock) {
+                if (epoch != runEpoch) return
+                fixCount++
+                // One emission per tick. Publishing before and after injection
+                // doubled the rate, and with it every recomposition and map
+                // redraw downstream.
+                _state.value = next.copy(
+                    fixCount = fixCount,
+                    lastFixWallClockMs = System.currentTimeMillis(),
+                    injectionError = error,
+                )
+                when {
+                    distanceMeters < geo.totalMeters - 0.01 -> false
+                    cfg.loopRoute -> {
+                        distanceMeters = 0.0
+                        nextStopIndex = 0
+                        false
+                    }
+                    else -> true
                 }
+            }
+            if (arrived) {
+                finish(geo)
+                return
             }
             delay(dtMs)
         }
+    }
+
+    /**
+     * One tick of the integrator, returning the acceleration it produced.
+     * Caller must hold [stateLock].
+     */
+    private fun advance(geo: RouteGeometry, cfg: SimulationConfig, dtMs: Long): Float {
+        val dt = dtMs / 1000.0
+
+        if (dwellRemainingMs > 0L) {
+            // Standing at a stop. Fixes keep flowing — a receiver that goes
+            // silent while parked is exactly what a real one does not do.
+            dwellRemainingMs = (dwellRemainingMs - dtMs).coerceAtLeast(0L)
+            speedMs = 0.0
+            elapsedMs += dtMs
+            return 0f
+        }
+
+        val previousSpeed = speedMs
+        step(geo, cfg, dt, dtMs)
+
+        // Reached the next stop?
+        stops.getOrNull(nextStopIndex)?.let { stop ->
+            if (distanceMeters >= stop.distanceMeters) {
+                distanceMeters = stop.distanceMeters
+                speedMs = 0.0
+                dwellRemainingMs = stop.dwellSeconds * 1000L
+                nextStopIndex++
+            }
+        }
+        return ((speedMs - previousSpeed) / dt).toFloat()
     }
 
     /** One integration step: pick a target, ease toward it, advance. */
@@ -359,8 +442,16 @@ class SimulationEngine(
         }
     }
 
-    private fun publish(geo: RouteGeometry, accelerationMs2: Float) {
-        val cfg = _config.value
+    /**
+     * Snapshot of the current instant. Pure: it returns the state rather than
+     * assigning it, so the caller decides when — and under what guard — it is
+     * published. Caller must hold [stateLock].
+     */
+    private fun buildState(
+        geo: RouteGeometry,
+        cfg: SimulationConfig,
+        accelerationMs2: Float,
+    ): SimulationState {
         val truePos = geo.positionAt(distanceMeters)
         val injected = if (cfg.gpsJitter) {
             LatLng(
@@ -371,7 +462,7 @@ class SimulationEngine(
 
         val hdop = (0.7f + (14 - satellites) * 0.11f).coerceIn(0.6f, 2.4f)
 
-        _state.value = _state.value.copy(
+        return _state.value.copy(
             position = truePos,
             injectedPosition = injected,
             bearingDegrees = geo.headingAt(distanceMeters),
@@ -401,47 +492,35 @@ class SimulationEngine(
         )
     }
 
-    private fun inject() {
-        val s = _state.value
-        val pos = s.injectedPosition ?: return
-        val error = mockLocation.push(
-            MockLocationEngine.Fix(
-                latitude = pos.latitude,
-                longitude = pos.longitude,
-                altitudeMeters = s.altitudeMeters,
-                bearingDegrees = s.bearingDegrees,
-                speedMs = s.speedMs,
-                accuracyMeters = s.accuracyMeters,
-                satellitesUsed = s.satellitesUsed,
-            )
+    /** The fix this instant should inject. Reads only immutable snapshot data. */
+    private fun SimulationState.toFix(): MockLocationEngine.Fix {
+        val pos = injectedPosition ?: position
+        return MockLocationEngine.Fix(
+            latitude = pos?.latitude ?: 0.0,
+            longitude = pos?.longitude ?: 0.0,
+            altitudeMeters = altitudeMeters,
+            bearingDegrees = bearingDegrees,
+            speedMs = speedMs,
+            accuracyMeters = accuracyMeters,
+            satellitesUsed = satellitesUsed,
         )
-        fixCount++
-        _state.value = _state.value.copy(
-            fixCount = fixCount,
-            lastFixWallClockMs = System.currentTimeMillis(),
-            injectionError = error,
-        )
-        if (error != null && mockLocation.status !is MockLocationEngine.Status.Ready) {
-            // The registration is gone, not merely a dropped fix. Continuing
-            // would report a live run that reaches no consumer at all.
-            _providerStatus.value = mockLocation.status
-            pause()
-        }
     }
 
     private fun finish(geo: RouteGeometry) {
-        distanceMeters = geo.totalMeters
-        speedMs = 0.0
-        publish(geo, accelerationMs2 = 0f)
         // Tear the providers down on arrival: leaving them registered would keep
         // the device pinned to the last injected fix until the next reboot.
         mockLocation.stop()
         _providerStatus.value = MockLocationEngine.Status.Idle
-        _state.value = _state.value.copy(
-            status = SimulationStatus.IDLE,
-            speedKmh = 0f,
-            activeProviders = emptyList(),
-        )
+        synchronized(stateLock) {
+            runEpoch++
+            distanceMeters = geo.totalMeters
+            speedMs = 0.0
+            _state.value = buildState(geo, _config.value, accelerationMs2 = 0f).copy(
+                status = SimulationStatus.IDLE,
+                speedKmh = 0f,
+                activeProviders = emptyList(),
+            )
+        }
         onRunningChanged?.invoke(false)
     }
 
