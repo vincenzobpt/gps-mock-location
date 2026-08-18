@@ -495,7 +495,7 @@ private fun StatusRow(
         Box(Modifier.weight(1f))
         when {
             simulation.isDwelling -> StatusPill(
-                text = "STOP ${simulation.stopsServed} · ${simulation.dwellRemainingSeconds}s",
+                text = "STOP ${(simulation.activeStopWaypoint ?: 0) + 1} · ${simulation.dwellRemainingSeconds}s",
                 color = Cockpit.Warn,
                 live = true,
             )
@@ -541,6 +541,12 @@ private fun blockerFor(
         "Location permission required",
         "Grant precise location so the platform accepts the test provider.",
         "GRANT",
+    )
+    status is MockLocationEngine.Status.Failed -> Blocker(
+        BlockerKind.MOCK_APP,
+        "Mock providers were lost",
+        "${status.reason}. Another app may have taken over mock location.",
+        "OPEN SETTINGS",
     )
     else -> null
 }

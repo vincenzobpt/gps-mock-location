@@ -62,7 +62,9 @@ class SimulationEngine(
     private var distanceMeters = 0.0
     private var speedMs = 0.0
     private var targetSpeedMs = 0.0
-    private var msSinceTargetPick = 0L
+
+    /** Countdown to the next cruising-target re-roll; 0 means "pick one now". */
+    private var msUntilTargetPick = 0L
     private var jitterLat = 0.0
     private var jitterLon = 0.0
     private var satellites = 11
@@ -74,7 +76,12 @@ class SimulationEngine(
     private var nextStopIndex = 0
     private var dwellRemainingMs = 0L
 
-    private data class Stop(val distanceMeters: Double, val dwellSeconds: Long)
+    private data class Stop(
+        /** Index into the caller's waypoint list, so rows and pins can be matched. */
+        val waypointIndex: Int,
+        val distanceMeters: Double,
+        val dwellSeconds: Long,
+    )
 
     // ── Configuration ───────────────────────────────────────────
 
@@ -99,17 +106,48 @@ class SimulationEngine(
         val geo = route?.let(::RouteGeometry)?.takeIf { it.isUsable }
         geometry = geo
 
-        // Snap each stop onto the geometry OSRM returned and keep them ordered
-        // by arc length: the user may drop stops in any order on the map, but
-        // the simulation can only meet them in the order it drives past them.
-        stops = if (geo == null) emptyList() else waypoints
-            .map { Stop(geo.arcLengthNearest(it.latLng), it.stayDurationSeconds) }
-            .filter { it.dwellSeconds > 0 }
-            .sortedBy { it.distanceMeters }
+        stops = if (geo == null) emptyList() else buildStops(geo, waypoints)
 
         _state.value = SimulationState(
             totalDistanceMeters = geo?.totalMeters ?: 0.0,
             updateIntervalMs = _config.value.intervalMs,
+        )
+    }
+
+    /**
+     * Snaps each waypoint onto the geometry OSRM returned and orders the result
+     * by arc length: the simulation can only meet stops in the order it drives
+     * past them. Drive-through waypoints (dwell 0) are dropped here, which is
+     * why each [Stop] carries the index it came from — without it the UI would
+     * be matching row 0 against a stop that belongs to a different waypoint.
+     */
+    private fun buildStops(geo: RouteGeometry, waypoints: List<Waypoint>): List<Stop> =
+        waypoints
+            .mapIndexed { index, wp ->
+                Stop(index, geo.arcLengthNearest(wp.latLng), wp.stayDurationSeconds)
+            }
+            .filter { it.dwellSeconds > 0 }
+            .sortedBy { it.distanceMeters }
+
+    /** Waypoint indices whose stop has already been served. */
+    private fun servedWaypoints(): Set<Int> =
+        stops.take(nextStopIndex).mapTo(mutableSetOf()) { it.waypointIndex }
+
+    /**
+     * Applies new dwell durations in place.
+     *
+     * Changing how long the simulation waits somewhere does not move the route,
+     * so this must not go through [setRoute] — that begins with [stop], which
+     * would tear down the providers and rewind a run already in progress.
+     */
+    fun updateStopDwells(waypoints: List<Waypoint>) {
+        val geo = geometry ?: return
+        stops = buildStops(geo, waypoints)
+        // Whatever lies behind us stays served, whatever its new duration.
+        nextStopIndex = stops.count { it.distanceMeters <= distanceMeters }
+        _state.value = _state.value.copy(
+            stopsTotal = stops.size,
+            servedWaypoints = servedWaypoints(),
         )
     }
 
@@ -133,9 +171,9 @@ class SimulationEngine(
      * exact reason when injection is not possible.
      */
     fun play(): MockLocationEngine.Status {
-        val geo = geometry ?: return MockLocationEngine.Status
-            .Failed("No route to simulate")
-            .also { _providerStatus.value = it }
+        // Not a provider problem, so it must not land in providerStatus — that
+        // drives the "mock providers lost" banner.
+        val geo = geometry ?: return MockLocationEngine.Status.Failed("No route to simulate")
 
         val providerStatus = mockLocation.start()
         _providerStatus.value = providerStatus
@@ -199,7 +237,7 @@ class SimulationEngine(
         distanceMeters = 0.0
         speedMs = 0.0
         targetSpeedMs = 0.0
-        msSinceTargetPick = 0L
+        msUntilTargetPick = 0L
         elapsedMs = 0L
         fixCount = 0L
         jitterLat = 0.0
@@ -283,9 +321,14 @@ class SimulationEngine(
         val ceiling = min(min(maxMs, curveMs), arrivalMs)
 
         // Re-roll the cruising target every few seconds for organic variation.
-        msSinceTargetPick += dtMs
-        if (msSinceTargetPick >= TARGET_HOLD_MS_MIN + random.nextInt(TARGET_HOLD_MS_SPAN)) {
-            msSinceTargetPick = 0L
+        // The countdown starts at zero so a fresh run picks a target on its very
+        // first tick: waiting for the first hold period to elapse left the
+        // vehicle parked at 0 km/h for 3.5-8 s after every DRIVE. Counting down
+        // to a threshold drawn once also gives the intended hold distribution,
+        // where re-drawing it on each comparison did not.
+        msUntilTargetPick -= dtMs
+        if (msUntilTargetPick <= 0L) {
+            msUntilTargetPick = (TARGET_HOLD_MS_MIN + random.nextInt(TARGET_HOLD_MS_SPAN)).toLong()
             val lo = min(minMs, ceiling)
             targetSpeedMs = lo + random.nextDouble() * (max(ceiling, lo) - lo)
         }
@@ -344,7 +387,10 @@ class SimulationEngine(
             pointIndex = geo.indexAt(distanceMeters),
             elapsedMillis = elapsedMs,
             stopsTotal = stops.size,
-            stopsServed = nextStopIndex.coerceAtMost(stops.size),
+            servedWaypoints = servedWaypoints(),
+            activeStopWaypoint = if (dwellRemainingMs > 0L) {
+                stops.getOrNull(nextStopIndex - 1)?.waypointIndex
+            } else null,
             dwellRemainingSeconds = (dwellRemainingMs + 999L) / 1000L,
             fixCount = fixCount,
             updateIntervalMs = cfg.intervalMs,
@@ -375,7 +421,9 @@ class SimulationEngine(
             lastFixWallClockMs = System.currentTimeMillis(),
             injectionError = error,
         )
-        if (error != null && mockLocation.status is MockLocationEngine.Status.NotSelectedAsMockApp) {
+        if (error != null && mockLocation.status !is MockLocationEngine.Status.Ready) {
+            // The registration is gone, not merely a dropped fix. Continuing
+            // would report a live run that reaches no consumer at all.
             _providerStatus.value = mockLocation.status
             pause()
         }

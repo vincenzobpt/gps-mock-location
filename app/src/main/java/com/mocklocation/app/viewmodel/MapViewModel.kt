@@ -191,9 +191,10 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         _waypoints.value = current.mapIndexed { i, wp ->
             if (i == index) wp.cycleDwell() else wp
         }
-        // Dwell does not change the geometry, but the engine holds the resolved
-        // stop list, so it has to be handed the new durations.
-        _route.value?.let { engine.setRoute(it, _waypoints.value) }
+        // Applied in place. Going through setRoute() would call stop() on the
+        // engine, tearing down the providers and rewinding a run in progress —
+        // for an edit that does not move the route at all.
+        engine.updateStopDwells(_waypoints.value)
     }
 
     fun clearWaypoints() {
@@ -223,6 +224,11 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearAll() {
+        // Cancel first: an in-flight OSRM response would otherwise land after
+        // the clear and reinstate the route, complete with stops for waypoints
+        // that no longer exist.
+        routeJob?.cancel()
+        _isCalculatingRoute.value = false
         engine.stop()
         engine.setRoute(null)
         _startPoint.value = null
@@ -288,7 +294,14 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
             repository.getRoute(points).fold(
                 onSuccess = { route ->
                     _route.value = route
+                    // setRoute() stops any run, because the geometry it was
+                    // driving no longer exists. Say so rather than letting the
+                    // simulation vanish without explanation.
+                    val interrupted = simulation.value.isActive
                     engine.setRoute(route, stops)
+                    if (interrupted) {
+                        _errorMessage.value = "Route changed — simulation stopped"
+                    }
                     requestFitRoute()
                 },
                 onFailure = { e ->

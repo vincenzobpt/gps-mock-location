@@ -41,7 +41,15 @@ data class SimulationState(
 
     // ── Intermediate stops ──────────────────────────────────────
     val stopsTotal: Int = 0,
-    val stopsServed: Int = 0,
+    /**
+     * Indices into the caller's waypoint list whose stop has been served.
+     *
+     * A count would not do: the engine drops drive-through waypoints and orders
+     * the rest by arc length, so its Nth stop is not the user's Nth waypoint.
+     */
+    val servedWaypoints: Set<Int> = emptySet(),
+    /** Waypoint index currently being stood at, or null when moving. */
+    val activeStopWaypoint: Int? = null,
     /** Seconds left standing at the current stop; 0 when moving. */
     val dwellRemainingSeconds: Long = 0L,
 

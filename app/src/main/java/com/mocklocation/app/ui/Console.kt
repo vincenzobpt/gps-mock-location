@@ -439,7 +439,7 @@ private fun RoutePane(
                 StopRow(
                     index = index,
                     waypoint = waypoint,
-                    served = state.isActive && state.stopsServed > index,
+                    served = state.isActive && index in state.servedWaypoints,
                     onCycleDwell = { onCycleDwell(index) },
                     onRemove = { onRemoveWaypoint(index) },
                 )

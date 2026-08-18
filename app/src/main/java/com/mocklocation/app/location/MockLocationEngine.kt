@@ -148,6 +148,7 @@ class MockLocationEngine(private val context: Context) {
 
         var lastError: String? = null
         var delivered = 0
+        val stale = mutableListOf<String>()
 
         for (provider in activeProviders) {
             try {
@@ -157,11 +158,27 @@ class MockLocationEngine(private val context: Context) {
                 lastError = "Mock location permission revoked"
                 status = Status.NotSelectedAsMockApp
             } catch (e: IllegalArgumentException) {
-                // Provider was torn down underneath us (e.g. another mock app
-                // took over). Drop the ready flag so the caller can re-arm.
+                // The provider was torn down underneath us — another mock app
+                // took over, or the platform reclaimed it.
                 lastError = e.message ?: "Provider '$provider' is no longer registered"
+                stale += provider
             } catch (e: Exception) {
                 lastError = e.message ?: e::class.java.simpleName
+            }
+        }
+
+        if (stale.isNotEmpty()) {
+            // Actually drop the dead handles and the ready flag. Leaving them in
+            // place let a run keep "succeeding" against providers that no longer
+            // existed, and made start() early-return on a stale Ready so pause
+            // then play could never re-register.
+            activeProviders.removeAll(stale)
+            if (status is Status.Ready) {
+                status = if (activeProviders.isEmpty()) {
+                    Status.Failed(lastError ?: "Test providers are no longer registered")
+                } else {
+                    Status.Ready(activeProviders.toList())
+                }
             }
         }
 
