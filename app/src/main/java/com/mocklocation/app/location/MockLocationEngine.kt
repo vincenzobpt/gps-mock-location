@@ -32,7 +32,7 @@ import android.util.Log
  *
  * Failures are classified and surfaced instead of being swallowed.
  */
-class MockLocationEngine(private val context: Context) {
+class MockLocationEngine(private val context: Context) : MockLocationPort {
 
     /** Outcome of [start], suitable for showing to the user verbatim. */
     sealed interface Status {
@@ -57,11 +57,11 @@ class MockLocationEngine(private val context: Context) {
     private val activeProviders = mutableListOf<String>()
 
     @Volatile
-    var status: Status = Status.Idle
+    override var status: Status = Status.Idle
         private set
 
     /** Providers currently accepting injected fixes. */
-    val providers: List<String> get() = activeProviders.toList()
+    override val providers: List<String> get() = activeProviders.toList()
 
     val isReady: Boolean get() = status is Status.Ready
 
@@ -71,7 +71,7 @@ class MockLocationEngine(private val context: Context) {
      * Registers the test providers. Idempotent: calling it while already running
      * returns the current status without churning the providers.
      */
-    fun start(): Status {
+    override fun start(): Status {
         if (status is Status.Ready) return status
 
         val lm = locationManager
@@ -123,7 +123,7 @@ class MockLocationEngine(private val context: Context) {
      * otherwise the fake provider outlives the app and the device keeps
      * reporting the last injected position instead of the real GPS.
      */
-    fun stop() {
+    override fun stop() {
         val lm = locationManager
         if (lm != null) {
             for (provider in activeProviders.toList() + candidateProviders()) {
@@ -142,7 +142,7 @@ class MockLocationEngine(private val context: Context) {
      *
      * @return null on success, or a human-readable reason for the failure.
      */
-    fun push(fix: Fix): String? {
+    override fun push(fix: Fix): String? {
         val lm = locationManager ?: return "LocationManager unavailable"
         if (activeProviders.isEmpty()) return "No active mock provider"
 

@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import com.mocklocation.app.location.MockLocationEngine
 import com.mocklocation.app.service.MockLocationService
 import com.mocklocation.app.simulation.SimulationEngine
 import org.osmdroid.config.Configuration
@@ -32,7 +33,7 @@ class MockLocationApp : Application() {
             osmdroidTileCache = filesDir.resolve("osmdroid/tiles")
         }
 
-        engine = SimulationEngine(applicationContext).apply {
+        engine = SimulationEngine(MockLocationEngine(applicationContext)).apply {
             onRunningChanged = { running ->
                 val intent = Intent(this@MockLocationApp, MockLocationService::class.java)
                 runCatching {

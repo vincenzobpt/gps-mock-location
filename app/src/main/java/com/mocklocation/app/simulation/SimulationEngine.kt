@@ -1,7 +1,7 @@
 package com.mocklocation.app.simulation
 
-import android.content.Context
 import com.mocklocation.app.location.MockLocationEngine
+import com.mocklocation.app.location.MockLocationPort
 import com.mocklocation.app.model.AltitudeMode
 import com.mocklocation.app.model.LatLng
 import com.mocklocation.app.model.Route
@@ -34,10 +34,14 @@ import kotlin.random.Random
  *
  * Motion is a proper time integration: every tick advances `distanceMeters` by
  * `v * dt` and derives the fix from the route's arc-length parameterisation.
+ *
+ * @param mockLocation The mock-location backend. [MockLocationEngine] is the
+ *   production implementation and talks to the real platform providers, which
+ *   only exist on a device — tests supply a fake here to drive the integrator
+ *   and its threading without one.
  */
 class SimulationEngine(
-    private val appContext: Context,
-    val mockLocation: MockLocationEngine = MockLocationEngine(appContext),
+    val mockLocation: MockLocationPort,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

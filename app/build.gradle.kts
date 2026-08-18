@@ -69,4 +69,10 @@ dependencies {
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)
+
+    // Tests — plain JVM, no Robolectric: SimulationEngine takes its
+    // mock-location backend through MockLocationPort, so the engine's
+    // integrator and its threading are exercised with a fake, never the real
+    // platform providers.
+    testImplementation(libs.junit)
 }
