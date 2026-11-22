@@ -14,9 +14,9 @@ android {
         targetSdk = 35
         // versionCode was left at 1 through the v1.1.0 and v1.2.0 tags, so an
         // APK never registered as an upgrade over the previous one. Realigned
-        // here: one code per release, 1.0.0=1 … 1.3.0=4.
-        versionCode = 4
-        versionName = "1.3.0"
+        // from v1.3.0 on: one code per release, 1.0.0=1 … 1.3.0=4, 1.3.1=5.
+        versionCode = 5
+        versionName = "1.3.1"
     }
 
     buildTypes {
