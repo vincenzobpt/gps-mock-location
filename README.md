@@ -169,7 +169,7 @@ app/build/outputs/apk/debug/app-debug.apk
 |---|---|
 | Language | **Kotlin** 2.1.x |
 | UI | **Jetpack Compose** + Material 3, custom osmdroid overlays for the route/vehicle/pins |
-| Map | **osmdroid** 6.1 — OpenStreetMap (light) and CARTO Dark Matter (dark) tiles |
+| Map | **osmdroid** 6.1 — OpenStreetMap tiles for both themes; the dark basemap is the same tiles inverted and hue-rotated by a `ColorMatrix`, so there is one tile source and one cache |
 | Routing | **OSRM** public API via Retrofit 2, arbitrary number of waypoints per request |
 | Architecture | **MVVM** — single-activity, AndroidViewModel + StateFlow, with the simulation clock owned by the `Application` (not the ViewModel) so a run survives leaving the screen |
 | Persistence | `SharedPreferences` for the basemap choice |

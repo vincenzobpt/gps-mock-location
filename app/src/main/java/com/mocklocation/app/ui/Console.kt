@@ -826,7 +826,7 @@ private fun TuningPane(
         Text(
             text = when (mapTheme) {
                 MapTheme.SYSTEM -> "Follows the device light/dark setting"
-                MapTheme.DARK -> "Always dark — CARTO Dark Matter"
+                MapTheme.DARK -> "Always dark — OpenStreetMap, inverted"
                 MapTheme.LIGHT -> "Always light — OpenStreetMap standard"
             },
             color = Cockpit.InkFaint,

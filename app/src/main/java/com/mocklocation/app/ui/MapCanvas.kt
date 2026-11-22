@@ -25,9 +25,7 @@ import com.mocklocation.app.model.SimulationState
 import com.mocklocation.app.model.SimulationStatus
 import com.mocklocation.app.ui.theme.Cockpit
 import org.osmdroid.events.MapEventsReceiver
-import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
-import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -75,7 +73,7 @@ fun MapCanvas(
         modifier = modifier,
         factory = { ctx ->
             MapView(ctx).apply {
-                setTileSource(darkTiles)
+                setTileSource(TileSourceFactory.MAPNIK)
                 setMultiTouchControls(true)
                 isTilesScaledToDpi = true
                 // The default zoom buttons duplicate our rail and fight the
@@ -136,24 +134,36 @@ fun MapCanvas(
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * A real dark basemap rather than a colour-matrix filter over Mapnik.
+ * The dark basemap is Mapnik inverted, with the hue rotated 180° to put the
+ * palette back: straight inversion alone turns land purple and water orange.
  *
- * Inverting Mapnik is the usual osmdroid trick and it does not work here:
- * Mapnik draws roads white, so inversion turns them black on a barely-lighter
- * ground and the whole map collapses into a flat dark rectangle. Dark Matter is
- * cartography that was designed dark, so roads stay legible and the accent
- * colours on top keep their contrast.
+ * Both steps are linear, so they collapse into the single matrix below and the
+ * tile overlay still pays for one filter. Deriving dark from the day tiles also
+ * means one tile source for both themes and one cache, with no second provider
+ * to keep alive — the provider this replaced went behind an API key.
+ *
+ * Do not rebuild the hue step from ColorMatrix.setRotate. An earlier attempt
+ * did, with three consecutive calls, and setRotate *resets* the matrix: only
+ * the last axis survived, red and green clamped to zero, and the map went flat
+ * dark. That is a trap, not an argument against the approach.
+ *
+ * Known cost, measured on real tiles before this landed: Mapnik draws minor
+ * roads white over pale land, so inverted they read as dark lines on a lighter
+ * ground — the opposite of cartography designed dark. It holds up well at city
+ * zoom and is merely legible at street zoom. A ColorMatrix is linear and cannot
+ * brighten roads selectively, so no tuning of this matrix fixes that; it would
+ * take a dark-drawn tile source.
  */
-private val darkTiles: OnlineTileSourceBase by lazy {
-    XYTileSource(
-        "CartoDarkMatter",
-        0, 20, 256, ".png",
-        arrayOf(
-            "https://a.basemaps.cartocdn.com/dark_all/",
-            "https://b.basemaps.cartocdn.com/dark_all/",
-            "https://c.basemaps.cartocdn.com/dark_all/",
-        ),
-        "© OpenStreetMap contributors, © CARTO"
+private val nightFilter: ColorMatrixColorFilter by lazy {
+    ColorMatrixColorFilter(
+        ColorMatrix(
+            floatArrayOf(
+                0.574f, -1.430f, -0.144f, 0f, 255f,
+                -0.426f, -0.430f, -0.144f, 0f, 255f,
+                -0.426f, -1.430f, 0.856f, 0f, 255f,
+                0f, 0f, 0f, 1f, 0f,
+            )
+        )
     )
 }
 
@@ -163,11 +173,7 @@ private val dayFilter: ColorMatrixColorFilter by lazy {
 }
 
 private fun applyTileStyle(map: MapView, night: Boolean) {
-    val wanted = if (night) darkTiles else TileSourceFactory.MAPNIK
-    if (map.tileProvider.tileSource.name() != wanted.name()) {
-        map.setTileSource(wanted)
-    }
-    map.overlayManager.tilesOverlay?.setColorFilter(if (night) null else dayFilter)
+    map.overlayManager.tilesOverlay?.setColorFilter(if (night) nightFilter else dayFilter)
     map.setBackgroundColor(if (night) Cockpit.Void.toArgb() else AndroidColor.WHITE)
 }
 
